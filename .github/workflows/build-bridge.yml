@@ -1,18 +1,21 @@
-name: Build owlet-bridge image
+name: Build images
 
-# Builds bridge/Dockerfile and publishes it to GHCR so the Unraid template
-# (and docker-compose) can pull a ready-made image instead of building locally.
+# Builds the deployable images and publishes them to GHCR so the Unraid
+# templates / docker run commands can pull ready-made images.
+#
+#   ghcr.io/<owner>/owlet-bridge    screen-capture bridge (redroid display -> RTSP)
+#   ghcr.io/<owner>/owlet-capture   one-time TUTK/Kalay capture appliance
 
 on:
   push:
     branches: ["**"]
     paths:
       - "bridge/**"
+      - "native-bridge/mitm/**"
+      - "native-bridge/probe/**"
+      - "native-bridge/capture/**"
       - ".github/workflows/build-bridge.yml"
   workflow_dispatch:
-
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/owlet-bridge
 
 jobs:
   build:
@@ -20,6 +23,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - name: owlet-bridge
+            context: ./bridge
+            dockerfile: ./bridge/Dockerfile
+          - name: owlet-capture
+            context: ./native-bridge
+            dockerfile: ./native-bridge/capture/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +48,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
@@ -45,7 +57,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./bridge
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

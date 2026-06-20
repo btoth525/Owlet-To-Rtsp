@@ -51,5 +51,14 @@ adb -s "$DEV" shell "pkill -f frida-server 2>/dev/null; \
   nohup /data/local/tmp/frida-server >/dev/null 2>&1 &" || true
 sleep 2
 
-echo "== done. Verify with:  frida-ps -U | grep -i owlet =="
-echo "Then run: ./frida/run-frida.sh $DEV  (cert capture)  or hook-tutk-ioctl.js (stream RE)"
+echo "== 4. Forward the frida port (reliable in containers) =="
+# frida-server listens on the device's 127.0.0.1:27042; expose it locally so
+# frida-tools can reach it with `-H 127.0.0.1:27042` (more robust than USB
+# enumeration when adb is talking to a network device like redroid).
+adb -s "$DEV" forward tcp:27042 tcp:27042 >/dev/null 2>&1 || true
+
+echo
+echo "== done =="
+echo "Verify:  FRIDA_HOST=127.0.0.1:27042 frida-ps -H 127.0.0.1:27042 | grep -i owlet"
+echo "Capture cloud auth:   ./frida/run-frida.sh $DEV unpin"
+echo "Capture stream proto: ./frida/run-frida.sh $DEV ioctl"

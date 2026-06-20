@@ -7,7 +7,19 @@ re-serving those pixels as **RTSP** for go2rtc / Frigate.
 This is a *screen-capture bridge*. The app decrypts and displays the video
 normally; we capture the output. No protocol or encryption work is involved.
 
-> **Honest expectations:** this works, but it's a UI-capture bridge, not a
+> ### Two paths in this repo
+> **1. Screen-capture bridge (this page, `bridge/`)** — works for *any* app-only
+> camera, reliable, but it's a UI capture (re-encoded pixels). Deploy it now.
+>
+> **2. Native TUTK/Kalay bridge (`native-bridge/`) — the better one.** Owlet Cam
+> v1/v2 run on ThroughTek/Kalay, the same platform as the Wyze cams
+> [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge) talks to. The
+> native path pulls real H.264 with a web UI — *the wyze-bridge experience for
+> Owlet*. It needs a **one-time capture** (packaged as the `owlet-capture`
+> container) to extract three Owlet-specific values. **Start here:**
+> [`native-bridge/README.md`](native-bridge/README.md).
+
+> **Honest expectations (screen-capture path):** this works, but it's a UI-capture bridge, not a
 > native RTSP cam. Quality/latency are set by decode→render→recapture→encode —
 > fine for monitoring + Frigate detection, not broadcast. The real effort is
 > Step 0 (host kernel modules) and the watchdog (keeping the session alive
@@ -42,10 +54,20 @@ the most compatible), and your GPU is used for **NVENC** encoding in the bridge.
 | `bridge/` | The bridge container: `Dockerfile`, `entrypoint.sh`, `capture.sh`, `watchdog.sh`, `go2rtc.yaml` |
 | `docker-compose.yml` | Full stack (redroid + bridge) for the Compose Manager plugin |
 | `.env.example` | All tunables; copy to `.env` |
-| `unraid/` | Unraid **Docker-tab templates** (`owlet-redroid.xml`, `owlet-bridge.xml`) |
+| `unraid/` | Unraid **Docker-tab templates** (`owlet-redroid.xml`, `owlet-bridge.xml`, `owlet-capture.xml`) |
 | `frigate/owlet.camera.yml` | Camera block to merge into your Frigate config |
 | `scripts/host-check.sh` | **Run first** — checks binder/ashmem + NVIDIA on the host |
-| `.github/workflows/build-bridge.yml` | Builds & pushes the bridge image to GHCR |
+| `native-bridge/` | **The native TUTK/Kalay path** — capture appliance + turnkey bridge (see its README) |
+| `.github/workflows/build-bridge.yml` | Builds & pushes `owlet-bridge` + `owlet-capture` images to GHCR |
+
+### Prebuilt images (GHCR)
+
+Once the GitHub Action has run, pull instead of build:
+
+```
+ghcr.io/btoth525/owlet-bridge:latest    # screen-capture bridge
+ghcr.io/btoth525/owlet-capture:latest   # one-time native-bridge capture appliance
+```
 
 Two ways to deploy — **docker-compose** (recommended) or **Unraid templates**.
 Pick one; the steps below cover both.

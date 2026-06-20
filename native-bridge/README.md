@@ -35,35 +35,57 @@ Everything else in here is generic TUTK and already written.
 
 ---
 
-## Phase 1 — Capture (run once)
+## Phase 1 — Capture (run once, on Unraid)
 
-You can instrument either the **redroid** container from the main stack (rooted,
-headless, already on your box) or a physical Android phone.
+The whole capture toolchain is packaged as **one container, `owlet-capture`** —
+mitmproxy (web UI) + adb + frida-tools + the scripts. Deploy it next to your
+`owlet-redroid` container, run three commands in its console, done. You can
+delete it afterwards.
 
+### Deploy it
+
+**Easiest — pull the prebuilt image (no PC, no build):**
 ```bash
-# 1. Start mitmproxy (web UI on :8081, proxy on :8080)
-cd native-bridge/mitm
-docker compose up -d
-#   open it once so it generates the CA, then:
-
-# 2. Point redroid at the proxy + install the CA + start frida-server
-./setup-redroid-mitm.sh <redroid-ip>:5555 <unraid-ip> 8080
-
-# 3a. Capture the CLOUD AUTH: spawn the app with cert-unpinning, then log in
-./frida/run-frida.sh <redroid-ip>:5555 unpin
-#   -> watch the mitmproxy console / captures/ for UID + AuthKey candidates
-
-# 3b. Capture the STREAM PROTOCOL: with the camera live-viewing, attach the
-#     IOCTL hook and note avClientStart2 args + the avSendIOCtrl start command
-./frida/run-frida.sh <redroid-ip>:5555 ioctl
+docker network create owlet-net 2>/dev/null || true
+docker run -d --name owlet-capture --network owlet-net \
+  -p 8080:8080 -p 8081:8081 \
+  -e MITM_IP=<unraid-ip> -e REDROID=owlet-redroid:5555 \
+  -v /mnt/user/appdata/owlet/captures:/captures \
+  -v /mnt/user/appdata/owlet/mitm-ca:/root/.mitmproxy \
+  ghcr.io/btoth525/owlet-capture:latest
 ```
 
-Optional sanity check it's really Kalay on your LAN:
+**Or via the Unraid template:** Docker → Add Container → paste the
+`unraid/owlet-capture.xml` raw URL, set **MITM_IP** to your server IP, apply.
+
+**Or build locally:**
 ```bash
-python3 native-bridge/probe/kalay-probe.py <camera-ip>
+docker build -f native-bridge/capture/Dockerfile -t owlet-capture native-bridge/
 ```
 
-The captures land in `mitm/captures/` with credential candidates highlighted.
+### Run the capture (open the container Console / `>_`)
+
+```bash
+# 1. Point redroid at the proxy, install the CA, start frida-server
+/app/mitm/setup-redroid-mitm.sh owlet-redroid:5555 <unraid-ip> 8080
+
+# 2a. CLOUD AUTH — spawn the app unpinned, then LOG IN in the Owlet app.
+#     Watch the console + web UI (http://<unraid-ip>:8081) for UID/AuthKey.
+/app/mitm/frida/run-frida.sh owlet-redroid:5555 unpin
+
+# 2b. STREAM PROTOCOL — open the camera live view, then attach the hook and
+#     note the avClientStart2 args + the avSendIOCtrl start command.
+/app/mitm/frida/run-frida.sh owlet-redroid:5555 ioctl
+
+# optional: confirm Kalay on the LAN
+python3 /app/probe/kalay-probe.py <camera-ip>
+```
+
+Captures land in the mapped `captures/` folder with credential candidates
+highlighted. **Send me that output and I'll wire in the three values.**
+
+> Driving the Owlet app's UI: use `scrcpy -s <unraid-ip>:5555` from any PC to
+> tap through login + open the live view while the Frida scripts are attached.
 
 ---
 
