@@ -79,9 +79,17 @@ function startLogStream() {
   es.onmessage = (e) => { l.textContent += e.data + "\n"; l.scrollTop = l.scrollHeight; };
 }
 
+async function discover() {
+  const ip = $("cam_ip").value.trim();
+  $("btn-discover").disabled = true;
+  await fetch("/api/discover", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ip})});
+  setTimeout(() => { $("btn-discover").disabled = false; refreshFindings(); }, 9000);
+}
+
 $("btn-save").onclick = save;
 $("btn-save2").onclick = saveAndRestart;
 $("btn-diagnose").onclick = diagnose;
+$("btn-discover").onclick = discover;
 $("btn-clear").onclick = () => $("log").textContent = "";
 $("btn-copy").onclick = () => navigator.clipboard.writeText($("log").textContent).then(()=>flash("Log copied."));
 

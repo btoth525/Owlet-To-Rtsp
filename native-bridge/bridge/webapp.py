@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import socket
 import threading
 import time
 from collections import deque
@@ -150,6 +152,99 @@ def logs():
             last = len(cur)
             time.sleep(0.4)
     return Response(gen(), mimetype="text/event-stream")
+
+
+# --------------------------------------------------------------------------- #
+# LAN camera discovery (Kalay UDP 63616)
+# --------------------------------------------------------------------------- #
+DISCOVERY_PORT = 63616
+# Candidate TUTK/Kalay LAN-search probes (exact bytes vary by SDK version, so
+# we send several and listen for any responder on 63616).
+DISCOVERY_PROBES = [
+    bytes.fromhex("f1411388"),
+    bytes.fromhex("f1300000"),
+    b"\x00\x00\x00\x00",
+    b"\x01\x00\x00\x00",
+    b"TUTK_SEARCH",
+]
+# A Kalay UID is ASCII: often 20 chars, sometimes grouped with dashes.
+UID_TOKEN = re.compile(rb"[A-Z0-9]{6,}-?[A-Z0-9]{4,}-?[A-Z0-9]{0,8}")
+
+
+def _discover_worker(target: str):
+    LOG.clear()
+    log("=== LAN camera discovery (UDP 63616) ===")
+    log("NOTE: this only works if the container is on the same L2 network as the")
+    log("camera — run it with `--network host` for broadcast, or give the camera IP.")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.settimeout(0.5)
+
+    dests = []
+    if target:
+        dests.append(target.strip())
+        log(f"probing {target.strip()} directly …")
+    dests.append("255.255.255.255")
+    log("broadcasting to 255.255.255.255 …")
+
+    for d in dests:
+        for p in DISCOVERY_PROBES:
+            try:
+                s.sendto(p, (d, DISCOVERY_PORT))
+            except OSError as e:
+                log(f"  send to {d} failed: {e}")
+
+    found: dict[str, list[str]] = {}
+    end = time.time() + 8
+    while time.time() < end:
+        try:
+            data, addr = s.recvfrom(2048)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        toks = [t.decode(errors="ignore") for t in UID_TOKEN.findall(data)
+                if 12 <= len(t) <= 24]
+        log(f"  ◀ response from {addr[0]}:{addr[1]} ({len(data)} bytes) "
+            f"hex={data[:32].hex()}")
+        if toks:
+            log(f"     UID candidate(s): {toks}")
+            found.setdefault(addr[0], [])
+            for t in toks:
+                if t not in found[addr[0]]:
+                    found[addr[0]].append(t)
+    s.close()
+
+    cands = []
+    for ip, uids in found.items():
+        for u in uids:
+            cands.append({"field": f"LAN {ip} <uid>", "value": u})
+    if cands:
+        STATE["candidates"] = cands + STATE.get("candidates", [])
+        log(f"\n[done] {len(cands)} UID candidate(s) on the LAN. "
+            "Click one under Findings to fill the UID field.")
+    else:
+        log("\n[done] No camera responded on UDP 63616.")
+        log("  → Likely the container can't reach the camera's network (use")
+        log("    `--network host`), or the Dream Duo uses a different LAN probe.")
+        log("  → Next step is the one-time AuthKey capture (which also yields the UID).")
+
+
+@app.post("/api/discover")
+def discover():
+    if STATE["busy"]:
+        return jsonify({"error": "busy"}), 409
+    target = (request.json or {}).get("ip", "") if request.is_json else ""
+
+    def run():
+        STATE["busy"] = True
+        try:
+            _discover_worker(target)
+        finally:
+            STATE["busy"] = False
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.get("/api/findings")
