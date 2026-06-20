@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>owlet-capture</Name>
+  <Repository>ghcr.io/btoth525/owlet-capture:latest</Repository>
+  <Registry>https://github.com/btoth525/Owlet-To-Rtsp/pkgs/container/owlet-capture</Registry>
+  <Network>owlet-net</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/btoth525/Owlet-To-Rtsp</Support>
+  <Project>https://github.com/btoth525/Owlet-To-Rtsp/tree/main/native-bridge/capture</Project>
+  <Overview>ONE-TIME, throwaway AuthKey capture for the native Owlet bridge. Bundles mitmproxy (web UI) + adb + frida-tools + the capture scripts. Deploy ALONGSIDE owlet-redroid (same owlet-net network). On start it auto-configures redroid (installs the mitmproxy CA, sets the proxy, starts frida-server), then prints the runbook in its log.
+
+Set MITM_IP to your Unraid server IP so redroid's Android can reach the proxy.
+
+USE: open the web UI (http://[IP]:8081, password 'owlet'). Install + drive the Owlet app via adb/scrcpy from your PC (adb connect [IP]:5555). Then in this container's Console run: /app/mitm/frida/run-frida.sh owlet-redroid:5555 unpin  — log into the app, open the camera live view, and watch /captures for the UID + AuthKey. Remove this container + owlet-redroid when done.
+
+Heads-up: the newest Owlet Dream app may refuse to log in on an emulator (Play Integrity) — see the project capture README for the GApps / phone fallback.</Overview>
+  <Category>Tools: MediaApp:Video</Category>
+  <WebUI>http://[IP]:[PORT:8081]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/owlet-capture.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/mitmproxy/mitmproxy/main/web/src/js/filt/mitmproxy.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="Web UI (8081)" Target="8081" Default="8081" Mode="tcp" Description="mitmproxy web UI (password: owlet)." Type="Port" Display="always" Required="true" Mask="false">8081</Config>
+  <Config Name="Proxy (8080)" Target="8080" Default="8080" Mode="tcp" Description="HTTP proxy redroid's Android points at (MITM_IP:8080)." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Captures" Target="/captures" Default="/mnt/user/appdata/owlet/captures" Mode="rw" Description="Where the UID/AuthKey candidates + full flows are written." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/captures</Config>
+  <Config Name="mitm CA store" Target="/root/.mitmproxy" Default="/mnt/user/appdata/owlet/mitm-ca" Mode="rw" Description="Persists the mitmproxy CA (installed into redroid)." Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/owlet/mitm-ca</Config>
+  <Config Name="MITM_IP" Target="MITM_IP" Default="" Mode="" Description="Your Unraid server IP — redroid's Android proxy points here. REQUIRED." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="REDROID" Target="REDROID" Default="owlet-redroid:5555" Mode="" Description="redroid adb host:port on owlet-net." Type="Variable" Display="always" Required="true" Mask="false">owlet-redroid:5555</Config>
+  <Config Name="MITM_PORT" Target="MITM_PORT" Default="8080" Mode="" Description="Proxy port." Type="Variable" Display="advanced" Required="false" Mask="false">8080</Config>
+  <Config Name="MITM_WEB_PASSWORD" Target="MITM_WEB_PASSWORD" Default="owlet" Mode="" Description="Password for the mitmproxy web UI." Type="Variable" Display="advanced" Required="false" Mask="false">owlet</Config>
+</Container>
