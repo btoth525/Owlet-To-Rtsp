@@ -1,0 +1,40 @@
+# Add this camera to your existing Frigate config.yml.
+# Replace <unraid-ip> with your server's IP (or use the container name "owlet-bridge"
+# if Frigate runs on the same docker network: owlet-net).
+#
+# Recommended: let go2rtc (inside owlet-bridge) be the single source so Frigate,
+# the web UI, and any viewer all pull from one supervised stream.
+
+# --- top-level go2rtc block (merge into your existing one) ---
+go2rtc:
+  streams:
+    owlet:
+      - rtsp://<unraid-ip>:8554/owlet
+
+# --- cameras block ---
+cameras:
+  owlet:
+    enabled: true
+    ffmpeg:
+      # NVDEC hardware decode (you have NVIDIA). Remove this line to decode on CPU.
+      hwaccel_args: preset-nvidia-h264
+      inputs:
+        - path: rtsp://127.0.0.1:8554/owlet   # Frigate's bundled go2rtc restream
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280       # match the bridge output (or the CROP size if you crop)
+      height: 720
+      fps: 5            # keep detection fps low
+    objects:
+      track:
+        - person
+    record:
+      enabled: true
+      retain:
+        days: 3
+        mode: motion
+    snapshots:
+      enabled: true

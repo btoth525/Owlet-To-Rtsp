@@ -1,0 +1,9 @@
+# Local environment (copy of .env.example with your values)
+.env
+
+# Owlet APK — do not commit
+*.apk
+
+# Captured frames used to measure crop coords
+frame*.png
+*.scratch

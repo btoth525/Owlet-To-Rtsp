@@ -1,0 +1,20 @@
+# go2rtc owns the capture pipeline (via exec) and serves it as RTSP.
+# go2rtc substitutes {output} with an internal RTSP URL it listens on, so
+# capture.sh's ffmpeg pushes there and go2rtc restreams to any consumer
+# (Frigate, the go2rtc web UI at :1984, WebRTC, etc).
+
+log:
+  level: info
+
+api:
+  listen: ":1984"        # web UI + API:  http://<unraid-ip>:1984
+
+rtsp:
+  listen: ":8554"        # rtsp://<unraid-ip>:8554/owlet
+
+webrtc:
+  listen: ":8555"        # low-latency browser viewing
+
+streams:
+  owlet:
+    - exec:bash /app/capture.sh {output}
