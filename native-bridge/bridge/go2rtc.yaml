@@ -1,0 +1,20 @@
+# go2rtc serves the camera and provides the video web UI (:1984) with
+# RTSP / WebRTC / MSE / HLS links. The control panel (webapp.py) runs on :8088.
+
+log:
+  level: info
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+
+streams:
+  owlet:
+    # Source the latest UI-saved settings, then run the TUTK client which writes
+    # raw H.264 to stdout. go2rtc supervises + restarts it.
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; exec python3 /app/tutk_client.py'

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>owlet-bridge-native</Name>
+  <Repository>ghcr.io/btoth525/owlet-bridge-native:latest</Repository>
+  <Registry>https://github.com/btoth525/Owlet-To-Rtsp/pkgs/container/owlet-bridge-native</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/btoth525/Owlet-To-Rtsp</Support>
+  <Project>https://github.com/btoth525/Owlet-To-Rtsp/tree/main/native-bridge/bridge</Project>
+  <Overview>Native Owlet Cam -> RTSP bridge, the docker-wyze-bridge way. NO emulator. Enter your Owlet account in the web control panel (http://[IP]:8088), it logs into the Owlet cloud, connects to the camera over ThroughTek/Kalay (TUTK), and serves the video as RTSP/WebRTC/HLS with a go2rtc UI (http://[IP]:1984). Point Frigate at rtsp://[IP]:8554/owlet.
+
+EVERYTHING is configured in the UI: account credentials, region, camera UID/AuthKey, AV settings. The "Connect &amp; Diagnose" button runs the real login and shows a live log so you can see exactly what happens (and share it for help).
+
+ONE manual prerequisite: the proprietary TUTK .so libs are not shipped. Extract them from the Owlet APK you own (see repo: native-bridge/bridge/extract-libs.sh) into the host folder mapped to /app/libs.</Overview>
+  <Category>Tools: MediaApp:Video HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:8088]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/owlet-bridge-native.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/AlexxIT/go2rtc/master/assets/logo.png</Icon>
+  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="Control panel (8088)" Target="8088" Default="8088" Mode="tcp" Description="Web UI — enter Owlet login, see logs." Type="Port" Display="always" Required="true" Mask="false">8088</Config>
+  <Config Name="Video UI (1984)" Target="1984" Default="1984" Mode="tcp" Description="go2rtc UI — RTSP/WebRTC/HLS links + preview." Type="Port" Display="always" Required="true" Mask="false">1984</Config>
+  <Config Name="RTSP (8554)" Target="8554" Default="8554" Mode="tcp" Description="rtsp://[IP]:8554/owlet — point Frigate here." Type="Port" Display="always" Required="true" Mask="false">8554</Config>
+  <Config Name="WebRTC tcp (8555)" Target="8555" Default="8555" Mode="tcp" Description="WebRTC." Type="Port" Display="advanced" Required="false" Mask="false">8555</Config>
+  <Config Name="WebRTC udp (8555)" Target="8555" Default="8555" Mode="udp" Description="WebRTC." Type="Port" Display="advanced" Required="false" Mask="false">8555</Config>
+  <Config Name="Config (settings)" Target="/config" Default="/mnt/user/appdata/owlet/config" Mode="rw" Description="Persists your UI settings." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/config</Config>
+  <Config Name="TUTK libs (/app/libs)" Target="/app/libs" Default="/mnt/user/appdata/owlet/libs" Mode="ro" Description="Folder containing x86_64/libIOTCAPIs.so + libAVAPIs.so extracted from the Owlet APK." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/libs</Config>
+</Container>

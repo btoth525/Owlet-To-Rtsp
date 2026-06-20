@@ -11,12 +11,12 @@ normally; we capture the output. No protocol or encryption work is involved.
 > **1. Screen-capture bridge (this page, `bridge/`)** — works for *any* app-only
 > camera, reliable, but it's a UI capture (re-encoded pixels). Deploy it now.
 >
-> **2. Native TUTK/Kalay bridge (`native-bridge/`) — the better one.** Owlet Cam
+> **2. Native TUTK/Kalay bridge (`native-bridge/`) — the main one.** Owlet Cam
 > v1/v2 run on ThroughTek/Kalay, the same platform as the Wyze cams
-> [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge) talks to. The
-> native path pulls real H.264 with a web UI — *the wyze-bridge experience for
-> Owlet*. It needs a **one-time capture** (packaged as the `owlet-capture`
-> container) to extract three Owlet-specific values. **Start here:**
+> [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge) talks to.
+> **No emulator** — enter your Owlet login in a web UI and it serves real H.264
+> as RTSP/WebRTC/HLS. The login + standard stream-start are implemented; a live
+> diagnostic log pins down the camera credential. **Start here:**
 > [`native-bridge/README.md`](native-bridge/README.md).
 
 > **Honest expectations (screen-capture path):** this works, but it's a UI-capture bridge, not a

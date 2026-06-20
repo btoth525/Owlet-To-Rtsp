@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Owlet Bridge</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>🦉 Owlet&nbsp;→&nbsp;RTSP Bridge</h1>
+    <div id="status" class="status"></div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1 · Owlet account</h2>
+      <div class="grid">
+        <label>Region
+          <select id="region">
+            <option value="world">world</option>
+            <option value="europe">europe</option>
+          </select>
+        </label>
+        <label>Email <input id="email" type="email" autocomplete="username"></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+      </div>
+      <div class="row">
+        <button id="btn-diagnose" class="primary">Connect &amp; Diagnose</button>
+        <button id="btn-save">Save settings</button>
+        <span class="hint">Diagnose runs the real login and dumps everything to the log →</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2 · Camera / TUTK settings</h2>
+      <p class="hint">Auto-filled from the diagnostic when found; otherwise paste them in.</p>
+      <div class="grid">
+        <label>Camera UID <input id="uid" placeholder="20-char Kalay UID"></label>
+        <label>AuthKey <input id="authkey" placeholder="DTLS AuthKey (v2 cams)"></label>
+        <label>AV account <input id="av_account" value="admin"></label>
+        <label>AV password <input id="av_password" type="password"></label>
+        <label>Start IOCTL <input id="iotype_start" value="0x01FF"></label>
+        <label>AV channel <input id="av_channel" value="0"></label>
+      </div>
+      <div class="row">
+        <button id="btn-save2">Save &amp; (re)start stream</button>
+        <a class="btn" id="go2rtc-link" href="#" target="_blank">Open video UI (go2rtc) ↗</a>
+        <span class="hint" id="rtsp-hint"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3 · Findings</h2>
+      <div id="findings" class="findings">Run a diagnostic to populate candidates.</div>
+    </section>
+
+    <section class="card">
+      <h2>Live log <button id="btn-clear" class="mini">clear</button>
+        <button id="btn-copy" class="mini">copy</button></h2>
+      <pre id="log" class="log"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

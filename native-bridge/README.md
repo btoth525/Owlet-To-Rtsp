@@ -1,154 +1,110 @@
-# Native bridge — the wyze-bridge pattern for the Owlet Cam
+# owlet-bridge (native) — the docker-wyze-bridge way for the Owlet Cam
 
-Owlet Cam v1 and v2 run on **ThroughTek / Kalay (TUTK)** — the same P2P platform
-as the Wyze cams that [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge)
-talks to (confirmed by Bitdefender's audit). So architecturally this is
-**wyze-bridge pointed at an Owlet camera**: talk Kalay directly, pull the native
-H.264, serve RTSP/WebRTC/HLS with a web UI. No emulator, no screen-capture, real
-resolution and latency.
+Owlet Cam v1/v2 run on **ThroughTek / Kalay (TUTK)** — the same P2P platform as
+the Wyze cams [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge)
+talks to. So this does what wyze-bridge does: **you enter your Owlet login in a
+web UI, it connects to the camera over Kalay and serves RTSP/WebRTC/HLS.** No
+emulator, no redroid, no screen-capture.
 
 ```
-Owlet Cam ──Kalay/TUTK P2P──▶ owlet_tutk_client.py ──H264──▶ go2rtc ──▶ RTSP/WebRTC/HLS + Web UI
-   ▲  (your account)              (ctypes over the                http://host:1984
-   └─ owlet_auth.py (your login → UID + AuthKey)   app's own .so libs)
+ Owlet account ──┐
+                 ▼
+   webapp.py  (control panel :8088)  ── Owlet cloud login (Firebase→Ayla)
+        │                                └─ live diagnostic log + findings
+        ▼  config
+   tutk_client.py ──Kalay/TUTK P2P──▶ Owlet Cam ──H264──▶ go2rtc ──▶ RTSP / WebRTC / HLS
+                                                            :8554      + video UI :1984
 ```
 
-## The honest part: why there's a one-time setup
+Everything is configurable in the browser: account credentials, region, camera
+UID/AuthKey, AV settings. The **Connect & Diagnose** button runs the *real*
+Owlet login and streams every step to a live log you can copy and share.
 
-wyze-bridge is turnkey because someone did the per-camera reverse-engineering
-**once** and bakes it in: how Wyze's cloud hands back the camera credentials, and
-the exact `avSendIOCtrl` command that starts the video. **No such project exists
-for Owlet yet** — so that one-time work has to happen a single time. After it's
-done, this container is just as turnkey as wyze-bridge: set `OWLET_EMAIL` /
-`OWLET_PASSWORD`, open the web UI, done.
+## What's solved vs. what we confirm from your logs
 
-You do **not** operate the capture forever. It's a ~30-minute, run-once step that
-extracts **three Owlet-specific values**, which then get baked in:
+| Piece | Status |
+|---|---|
+| Owlet cloud login (Firebase → Ayla SSO → Ayla API) | **Implemented** (real keys/endpoints) |
+| Stream-start command | **Standard** TUTK `IOTYPE_USER_IPCAM_START` (0x01FF) — not a guess |
+| TUTK connect + frame loop → go2rtc | **Implemented** |
+| *Which field carries the camera's Kalay UID / AuthKey* | **Confirmed from your diagnostic log** ← the one open item |
 
-| # | Value | Where it comes from |
-|---|---|---|
-| 1 | Cloud auth → **UID + AuthKey** | `mitm/` capture of your login + device-list calls |
-| 2 | **AV account/password** for `avClientStart2` | `frida/hook-tutk-ioctl.js` dump of `avClientStart2` |
-| 3 | **Stream-start IOCTL** (type + payload) | `frida/hook-tutk-ioctl.js` dump of `avSendIOCtrl` |
-
-Everything else in here is generic TUTK and already written.
+The Owlet **Sock** lives on Ayla; the **Cam** is Kalay. The diagnostic dumps
+everything the account returns so we can pinpoint the camera's UID/AuthKey (it
+may be in the device list, in device properties, or on a separate endpoint —
+your log tells us which). Until then you can paste a UID/AuthKey straight into
+the UI and stream immediately.
 
 ---
 
-## Phase 1 — Capture (run once, on Unraid)
+## Deploy on Unraid
 
-The whole capture toolchain is packaged as **one container, `owlet-capture`** —
-mitmproxy (web UI) + adb + frida-tools + the scripts. Deploy it next to your
-`owlet-redroid` container, run three commands in its console, done. You can
-delete it afterwards.
+**Prereq (one-time):** the proprietary TUTK `.so` libs aren't shipped — extract
+them from the Owlet APK you own into the libs folder:
 
-### Deploy it
-
-**Easiest — pull the prebuilt image (no PC, no build):**
 ```bash
-docker network create owlet-net 2>/dev/null || true
-docker run -d --name owlet-capture --network owlet-net \
-  -p 8080:8080 -p 8081:8081 \
-  -e MITM_IP=<unraid-ip> -e REDROID=owlet-redroid:5555 \
-  -v /mnt/user/appdata/owlet/captures:/captures \
-  -v /mnt/user/appdata/owlet/mitm-ca:/root/.mitmproxy \
-  ghcr.io/btoth525/owlet-capture:latest
+# on any machine with the apk + unzip
+native-bridge/bridge/extract-libs.sh /path/to/owlet.apk x86_64
+# -> copies libIOTCAPIs.so, libAVAPIs.so into native-bridge/bridge/libs/x86_64
+# put that folder at  /mnt/user/appdata/owlet/libs  on Unraid
 ```
 
-**Or via the Unraid template:** Docker → Add Container → paste the
-`unraid/owlet-capture.xml` raw URL, set **MITM_IP** to your server IP, apply.
-
-**Or build locally:**
+**Then — prebuilt image (terminal):**
 ```bash
-docker build -f native-bridge/capture/Dockerfile -t owlet-capture native-bridge/
+docker run -d --name owlet-bridge --restart unless-stopped \
+  -p 8088:8088 -p 1984:1984 -p 8554:8554 -p 8555:8555/tcp -p 8555:8555/udp \
+  -v /mnt/user/appdata/owlet/config:/config \
+  -v /mnt/user/appdata/owlet/libs:/app/libs:ro \
+  ghcr.io/btoth525/owlet-bridge-native:latest
 ```
 
-### Run the capture (open the container Console / `>_`)
+**Or the Unraid template:** Docker → Add Container → paste the
+`unraid/owlet-bridge-native.xml` raw URL → set the libs + config paths → apply.
 
+**Or compose / local build:**
 ```bash
-# 1. Point redroid at the proxy, install the CA, start frida-server
-/app/mitm/setup-redroid-mitm.sh owlet-redroid:5555 <unraid-ip> 8080
-
-# 2a. CLOUD AUTH — spawn the app unpinned, then LOG IN in the Owlet app.
-#     Watch the console + web UI (http://<unraid-ip>:8081) for UID/AuthKey.
-/app/mitm/frida/run-frida.sh owlet-redroid:5555 unpin
-
-# 2b. STREAM PROTOCOL — open the camera live view, then attach the hook and
-#     note the avClientStart2 args + the avSendIOCtrl start command.
-/app/mitm/frida/run-frida.sh owlet-redroid:5555 ioctl
-
-# optional: confirm Kalay on the LAN
-python3 /app/probe/kalay-probe.py <camera-ip>
-```
-
-Captures land in the mapped `captures/` folder with credential candidates
-highlighted. **Send me that output and I'll wire in the three values.**
-
-> Driving the Owlet app's UI: use `scrcpy -s <unraid-ip>:5555` from any PC to
-> tap through login + open the live view while the Frida scripts are attached.
-
----
-
-## Phase 2 — Bake in + run (turnkey from here)
-
-```bash
-# Pull the TUTK SDK libs out of the APK you already have
-cd native-bridge/tutk
-./extract-libs.sh /path/to/owlet.apk x86_64      # or arm64-v8a
-
-# Put the 3 captured values into .env (or owlet_auth.py / owlet_tutk_client.py)
-cat > .env <<'EOF'
-OWLET_EMAIL=you@example.com
-OWLET_PASSWORD=...
-OWLET_AV_ACCOUNT=admin
-OWLET_AV_PASSWORD=<from capture>
-OWLET_IOTYPE_START=0x<from capture>
-OWLET_START_PAYLOAD_HEX=<from capture>
-EOF
-
-docker network create owlet-net 2>/dev/null || true
+cd native-bridge/bridge
 docker compose up -d --build
 ```
 
-Then it behaves exactly like wyze-bridge:
+---
 
-- **Web UI:** `http://<host>:1984` — stream tile + copy-paste RTSP/WebRTC/HLS links
-- **RTSP:** `rtsp://<host>:8554/owlet` → drop straight into your existing Frigate
+## Use it
+
+1. Open **`http://<unraid-ip>:8088`**.
+2. Enter your Owlet **email / password**, pick **region**, click **Connect & Diagnose**.
+3. Watch the live log. Candidates (UID/AuthKey/etc.) appear under **Findings** —
+   click one to fill the field. If nothing auto-fills, **copy the whole log and
+   send it to me** and we'll find the camera credential together.
+4. Once UID (+ AuthKey for v2) is set, click **Save & (re)start stream**.
+5. Video at **`http://<unraid-ip>:1984`**, and **`rtsp://<unraid-ip>:8554/owlet`**
+   straight into Frigate.
 
 ---
 
-## Files
+## Files (`bridge/`)
 
-| Path | Role |
+| File | Role |
 |---|---|
-| `mitm/owlet_addon.py` | mitmproxy addon — extracts UID/AuthKey from your auth flow |
-| `mitm/frida/ssl-unpinning.js` | makes the app accept the mitm CA (your traffic) |
-| `mitm/frida/hook-tutk-ioctl.js` | dumps the live TUTK stream-start protocol |
-| `mitm/setup-redroid-mitm.sh` | proxy + CA + frida-server onto the redroid container |
-| `mitm/frida/run-frida.sh` | launch the app under either Frida script |
-| `mitm/docker-compose.yml` | standalone mitmproxy + the addon |
-| `probe/kalay-probe.py` | confirm Kalay on UDP 63616 |
-| `tutk/extract-libs.sh` | pull `libIOTCAPIs.so` / `libAVAPIs.so` from the APK |
-| `tutk/owlet_auth.py` | Owlet login → UID + AuthKey (the "just enter creds" layer) |
-| `tutk/owlet_tutk_client.py` | TUTK IOTC/AV client → raw H.264 to stdout |
-| `tutk/go2rtc.yaml` | serves RTSP/WebRTC/HLS + web UI |
-| `tutk/Dockerfile` / `docker-compose.yml` | the turnkey container |
+| `owlet_api.py` | Real Owlet login (Firebase→Ayla) + device dump + candidate hunter |
+| `tutk_client.py` | Kalay/TUTK connect + standard start IOCTL → raw H.264 to stdout |
+| `webapp.py` | Control-panel web UI (config, diagnose, logs, findings, status) |
+| `templates/`, `static/` | The UI |
+| `go2rtc.yaml` | Serves RTSP/WebRTC/HLS + video UI; supervises the TUTK client |
+| `extract-libs.sh` | Pull TUTK `.so` from the Owlet APK |
+| `Dockerfile`, `docker-compose.yml` | The container |
+
+## `mitm/` and `probe/` — optional, only if the cloud doesn't hand over the AuthKey
+
+If the diagnostic shows the camera's AuthKey isn't returned by the Owlet cloud
+(newer DTLS-gated firmware), `mitm/` has a mitmproxy addon + Frida scripts to
+read it from your **own phone's** app traffic once (no redroid needed), and
+`probe/kalay-probe.py` confirms Kalay on UDP 63616. We only reach for these if
+the logs say we must.
 
 ## Legal / ethical
 
-This is interoperability with **your own** camera, account, and app traffic —
-the same basis the Wyze/Owlet bridges and security researchers operate on. It
-may run against Owlet's Terms of Service (a civil matter); don't redistribute
-their proprietary `.so` libraries — each user extracts them from the app they
-already installed. Don't point any of this at devices or accounts that aren't
-yours.
-
-## Reality check vs. the screen-capture bridge
-
-- **If the capture yields a clean UID + AuthKey + start-IOCTL:** this is the
-  better path by far — native quality, low latency, no emulator. Worth it.
-- **If Owlet's newer firmware gates the AuthKey behind device-bound DTLS or
-  rotates it server-side:** the native path gets much harder, and the
-  screen-capture bridge in the repo root remains the reliable fallback.
-
-Phase 1 is the cheap experiment that tells you which world you're in.
+Interoperability with **your own** camera, account, and traffic — same basis as
+the Wyze/Owlet community tools. Don't redistribute Owlet's proprietary `.so`
+libraries; each user extracts them from the app they installed. Don't point this
+at devices or accounts that aren't yours.

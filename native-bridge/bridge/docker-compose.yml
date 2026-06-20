@@ -1,0 +1,24 @@
+# owlet-bridge — native Owlet/Kalay -> RTSP, configured entirely from the web UI.
+#
+#   docker compose up -d --build
+#   open  http://<host>:8088   -> enter your Owlet login, Connect & Diagnose
+#
+# No redroid, no emulator. Just credentials in, RTSP out — the wyze-bridge model.
+
+name: owlet-bridge
+
+services:
+  owlet-bridge:
+    build: .
+    image: ghcr.io/btoth525/owlet-bridge-native:latest
+    container_name: owlet-bridge
+    restart: unless-stopped
+    volumes:
+      - ${APPDATA:-/mnt/user/appdata/owlet}/config:/config   # settings persist here
+      - ./libs:/app/libs:ro                                   # TUTK .so libs (from the APK)
+    ports:
+      - "8088:8088"   # control panel
+      - "1984:1984"   # go2rtc video UI
+      - "8554:8554"   # RTSP -> Frigate
+      - "8555:8555/tcp"
+      - "8555:8555/udp"

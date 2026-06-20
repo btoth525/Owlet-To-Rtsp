@@ -9,7 +9,7 @@ frame*.png
 *.scratch
 
 # native-bridge: proprietary TUTK libs + private captures — never commit
-native-bridge/tutk/libs/**/*.so
+native-bridge/bridge/libs/**/*.so
 native-bridge/mitm/captures/
 native-bridge/mitm/mitm-data/
 frida-server-*

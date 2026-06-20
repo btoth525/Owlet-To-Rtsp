@@ -11,6 +11,7 @@ on:
     branches: ["**"]
     paths:
       - "bridge/**"
+      - "native-bridge/bridge/**"
       - "native-bridge/mitm/**"
       - "native-bridge/probe/**"
       - "native-bridge/capture/**"
@@ -26,12 +27,14 @@ jobs:
     strategy:
       matrix:
         include:
+          # The native Owlet/Kalay bridge (the wyze-bridge-style product).
+          - name: owlet-bridge-native
+            context: ./native-bridge/bridge
+            dockerfile: ./native-bridge/bridge/Dockerfile
+          # Legacy screen-capture bridge (redroid display -> RTSP).
           - name: owlet-bridge
             context: ./bridge
             dockerfile: ./bridge/Dockerfile
-          - name: owlet-capture
-            context: ./native-bridge
-            dockerfile: ./native-bridge/capture/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

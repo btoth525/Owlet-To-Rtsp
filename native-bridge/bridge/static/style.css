@@ -1,0 +1,39 @@
+:root{
+  --bg:#0f1216; --card:#171c23; --line:#262e38; --fg:#e7edf3; --muted:#8b97a6;
+  --accent:#3fa7ff; --good:#39d98a; --bad:#ff5d5d; --warn:#ffcf5c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:16px 24px;border-bottom:1px solid var(--line);background:#11151b;position:sticky;top:0;z-index:5}
+h1{font-size:18px;margin:0}
+h2{font-size:15px;margin:0 0 12px;color:var(--fg)}
+main{max-width:880px;margin:0 auto;padding:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:18px;margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
+input,select{background:#0e1318;border:1px solid var(--line);color:var(--fg);
+  border-radius:8px;padding:9px 10px;font-size:14px}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+.row{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
+button,.btn{background:#222a34;color:var(--fg);border:1px solid var(--line);
+  border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block}
+button:hover,.btn:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+button.mini{padding:2px 8px;font-size:12px;margin-left:8px}
+.hint{color:var(--muted);font-size:13px}
+.status{display:flex;gap:14px;font-size:13px}
+.status .dot{display:inline-flex;align-items:center;gap:6px}
+.status .dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.status .dot.on::before{background:var(--good)}
+.status .dot.off::before{background:var(--bad)}
+.log{background:#0a0e12;border:1px solid var(--line);border-radius:8px;
+  padding:12px;height:320px;overflow:auto;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;
+  white-space:pre-wrap;color:#cfe3f5}
+.findings .cand{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;
+  border:1px solid var(--line);border-radius:8px;margin-bottom:6px;background:#0e1318;cursor:pointer}
+.findings .cand:hover{border-color:var(--accent)}
+.findings .f{color:var(--accent);font-family:ui-monospace,monospace;font-size:12.5px}
+.findings .v{color:var(--fg);font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
