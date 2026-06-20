@@ -1,0 +1,41 @@
+# One-shot AuthKey capture stack (throwaway). Bring it up, grab the camera's
+# Kalay UID + AuthKey, then `docker compose down`.
+#
+#   MITM_IP=<your-unraid-ip> docker compose up -d --build
+#
+# Then follow the runbook printed by the owlet-capture container (docker logs
+# owlet-capture) or README.md.
+
+name: owlet-capture
+
+services:
+  redroid:
+    image: redroid/redroid:11.0.0-latest
+    container_name: owlet-redroid
+    privileged: true
+    restart: unless-stopped
+    volumes:
+      - ${APPDATA:-/mnt/user/appdata/owlet}/redroid-data:/data
+    command:
+      - androidboot.redroid_gpu_mode=guest
+    ports:
+      - "5555:5555"          # adb (install the app + scrcpy from your PC)
+
+  capture:
+    build:
+      context: ..
+      dockerfile: capture/Dockerfile
+    image: ghcr.io/btoth525/owlet-capture:latest
+    container_name: owlet-capture
+    depends_on: [redroid]
+    environment:
+      REDROID: owlet-redroid:5555
+      MITM_IP: ${MITM_IP:?set MITM_IP to your Unraid server IP, e.g. MITM_IP=192.168.1.10}
+      MITM_PORT: "8080"
+      MITM_WEB_PASSWORD: ${MITM_WEB_PASSWORD:-owlet}
+    volumes:
+      - ${APPDATA:-/mnt/user/appdata/owlet}/captures:/captures
+      - ${APPDATA:-/mnt/user/appdata/owlet}/mitm-ca:/root/.mitmproxy
+    ports:
+      - "8080:8080"          # proxy (redroid points here)
+      - "8081:8081"          # mitmproxy web UI

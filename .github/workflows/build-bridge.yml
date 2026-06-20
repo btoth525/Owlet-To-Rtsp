@@ -31,6 +31,10 @@ jobs:
           - name: owlet-bridge-native
             context: ./native-bridge/bridge
             dockerfile: ./native-bridge/bridge/Dockerfile
+          # One-shot AuthKey capture appliance (mitmproxy + adb + frida).
+          - name: owlet-capture
+            context: ./native-bridge
+            dockerfile: ./native-bridge/capture/Dockerfile
           # Legacy screen-capture bridge (redroid display -> RTSP).
           - name: owlet-bridge
             context: ./bridge
