@@ -134,6 +134,7 @@ def diagnose():
             cfg[k] = incoming[k]
     LOG.clear()
     log("=== Owlet login diagnostic ===")
+    log("build: firebase-android-cert-auth (if you don't see this line, you're on the OLD image)")
     threading.Thread(target=_diagnose_worker, args=(cfg,), daemon=True).start()
     return jsonify({"ok": True})
 
