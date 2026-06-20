@@ -43,6 +43,12 @@ FIREBASE_URL = ("https://www.googleapis.com/identitytoolkit/v3/relyingparty/"
                 "verifyPassword?key={key}")
 MINI_URL = "https://ayla-sso.owletdata.com/mini/"
 
+# Owlet's Firebase API key is restricted to the official Android app, so Google
+# requires the app's identity headers or it returns 403 "Requests from this
+# Android client application <empty> are blocked".
+ANDROID_PACKAGE = "com.owletcare.owletcare"
+ANDROID_CERT = "2A3BC26DB0B8B0792DBE28E6FFDC2598F9B12B74"
+
 # Fields that may carry the Kalay camera credentials.
 CRED_KEYS = re.compile(
     r"uid|authkey|auth_key|p2p|kalay|tutk|dsn|serial|model|oem|product|"
@@ -82,6 +88,8 @@ class OwletAPI:
             FIREBASE_URL.format(key=self.cfg["firebase_key"]),
             json={"email": self.email, "password": self.password,
                   "returnSecureToken": True},
+            headers={"X-Android-Package": ANDROID_PACKAGE,
+                     "X-Android-Cert": ANDROID_CERT},
             timeout=20,
         )
         if r.status_code != 200:
@@ -96,7 +104,7 @@ class OwletAPI:
     # -- step 2: Ayla SSO mini token ---------------------------------------
     def _mini(self, jwt: str) -> str:
         self.log("[2/4] GET ayla-sso mini token …")
-        r = self.s.get(MINI_URL, headers={"Authorization": f"Bearer {jwt}"}, timeout=20)
+        r = self.s.get(MINI_URL, headers={"Authorization": jwt}, timeout=20)
         if r.status_code != 200:
             self.log(f"      mini HTTP {r.status_code}: {r.text[:300]}")
             raise OwletError(f"ayla-sso mini failed ({r.status_code})")
@@ -112,7 +120,7 @@ class OwletAPI:
         r = self.s.post(
             self.cfg["sign_in"],
             json={"app_id": self.cfg["app_id"], "app_secret": self.cfg["app_secret"],
-                  "token": mini},
+                  "provider": "owl_id", "token": mini},
             timeout=20,
         )
         if r.status_code != 200:
