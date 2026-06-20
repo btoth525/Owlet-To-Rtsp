@@ -23,5 +23,5 @@ The androidboot arguments (GPU mode / resolution) are set in "Extra Parameters" 
   <DonateText/>
   <DonateLink/>
   <Config Name="Android data (/data)" Target="/data" Default="/mnt/user/appdata/owlet/redroid-data" Mode="rw" Description="Persists app install + login across restarts." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/redroid-data</Config>
-  <Config Name="adb port (5555)" Target="5555" Default="5555" Mode="tcp" Description="adb — used for the one-time app install and login from your PC." Type="Port" Display="always" Required="true" Mask="false">5555</Config>
+  <Config Name="adb port (host 5577 -> 5555)" Target="5555" Default="5577" Mode="tcp" Description="adb — connect from your PC to 192.168.x.x:5577 (uncommon host port to avoid conflicts; maps to redroid's internal 5555)." Type="Port" Display="always" Required="true" Mask="false">5577</Config>
 </Container>

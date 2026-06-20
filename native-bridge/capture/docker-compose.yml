@@ -19,7 +19,7 @@ services:
     command:
       - androidboot.redroid_gpu_mode=guest
     ports:
-      - "5555:5555"          # adb (install the app + scrcpy from your PC)
+      - "5577:5555"          # adb (PC connects to <ip>:5577; uncommon host port)
 
   capture:
     build:
@@ -31,11 +31,11 @@ services:
     environment:
       REDROID: owlet-redroid:5555
       MITM_IP: ${MITM_IP:?set MITM_IP to your Unraid server IP, e.g. MITM_IP=192.168.1.10}
-      MITM_PORT: "8080"
+      MITM_PORT: "8470"
       MITM_WEB_PASSWORD: ${MITM_WEB_PASSWORD:-owlet}
     volumes:
       - ${APPDATA:-/mnt/user/appdata/owlet}/captures:/captures
       - ${APPDATA:-/mnt/user/appdata/owlet}/mitm-ca:/root/.mitmproxy
     ports:
-      - "8080:8080"          # proxy (redroid points here)
-      - "8081:8081"          # mitmproxy web UI
+      - "8470:8470"          # proxy (redroid points here; uncommon port)
+      - "8471:8081"          # mitmproxy web UI
