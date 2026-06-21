@@ -36,6 +36,14 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/owlet.yaml")
 ENV_PATH = os.environ.get("ENV_PATH", "/config/owlet.env")
 GO2RTC_API = os.environ.get("GO2RTC_API", "http://127.0.0.1:1984")
 
+# The TUTK license key + US region (3) are baked into the Owlet Android app and
+# recovered by decompiling it; pre-fill them so the camera connects out of the box.
+APP_LICENSE_KEY = (
+    "AQAAAGHr2tF3sL8TGR+XirMqZSd8hKY3eBRqKIceLcUSy2okTWYU27qQmwzBORp3tw1yoqiX7l+"
+    "yoikFTI+Dzh9M+utHJ/3UBjL8FkYk4kuTSdcE6FtpD3Gidjxnmu2z9TONdpEx15uXvTATqSexOC"
+    "GDcldb3xtVXRmH0GoVx9SPKwVPaj7/iYJnPaaURxPzEbEr2Yfd0ckSZoZ8jRH5jxmcJdob"
+)
+
 DEFAULTS = {
     "region": "world",
     "email": "",
@@ -46,10 +54,10 @@ DEFAULTS = {
     "authkey": "",
     "av_account": "admin",
     "av_password": "",
-    "iotype_start": "0x01FF",
+    "iotype_start": "511",
     "av_channel": "0",
-    "license_key": "",
-    "region_code": "",
+    "license_key": APP_LICENSE_KEY,
+    "region_code": "3",
 }
 
 LOG: deque[str] = deque(maxlen=6000)
