@@ -3,13 +3,15 @@
 #   docker compose up -d --build
 #   open  http://<host>:8088   -> enter your Owlet login, Connect & Diagnose
 #
-# No redroid, no emulator. Just credentials in, RTSP out — the wyze-bridge model.
+# No emulator. Just credentials in, RTSP out — the wyze-bridge model.
 
 name: owlet-bridge
 
 services:
   owlet-bridge:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bionic   # Bionic/Termux runtime so the Android TUTK libs load
     image: ghcr.io/btoth525/owlet-bridge-native:latest
     container_name: owlet-bridge
     restart: unless-stopped
