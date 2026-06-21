@@ -78,7 +78,7 @@ AV_SECURITY_MODE = os.environ.get("OWLET_AV_SECURITY_MODE", "").strip()
 AV_AUTH_TYPE = int(os.environ.get("OWLET_AV_AUTH_TYPE") or "0")
 AV_SYNC_RECV = int(os.environ.get("OWLET_AV_SYNC_RECV") or "0")
 
-FRAME_BUF = 1024 * 1024
+FRAME_BUF = 2 * 1024 * 1024   # 2 MB — fits a 1440p/2K keyframe without truncation
 FINFO_BUF = 64
 IOTC_ER_ALREADY_INITIALIZED = -3
 AV_ER_DATA_NOREADY = -20012
@@ -305,7 +305,9 @@ def stream_once(uid: str, sec_mode: int) -> int:
                                      byref(actual), byref(expected),
                                      finfo, FINFO_BUF, byref(finfo_len), byref(frmno))
             if rc >= 0 and actual.value > 0:
-                out.write(buf.raw[:actual.value]); out.flush()
+                # zero-copy: write a view of just the frame bytes, not a full
+                # 2 MB .raw copy of the whole buffer every frame (matters at 25fps).
+                out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
                 if time.time() - last_log > 10:
                     log(f"{frames} frames forwarded"); last_log = time.time()
