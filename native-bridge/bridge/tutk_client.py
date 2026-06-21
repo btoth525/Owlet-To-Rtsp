@@ -70,9 +70,17 @@ AV_CHANNEL = int(os.environ.get("OWLET_AV_CHANNEL") or "0")
 LICENSE_KEY = os.environ.get("OWLET_LICENSE_KEY") or APP_LICENSE_KEY
 REGION_CODE = int(os.environ.get("OWLET_REGION_CODE") or "3")          # 3 = REGION_US
 CONNECT_TIMEOUT = int(os.environ.get("OWLET_CONNECT_TIMEOUT") or "20")
+# AV layer (avClientStartEx, the path the Owlet app uses). security_mode:
+# 0=Simple 1=Dtls 2=Auto; auth_type: 0=Password 1=Token 2=Nebula. If
+# OWLET_AV_SECURITY_MODE is blank we auto-probe [Auto, Dtls, Simple] because the
+# Dream Duo rejects plain avClientStart2 (simple) with a DTLS-class error.
+AV_SECURITY_MODE = os.environ.get("OWLET_AV_SECURITY_MODE", "").strip()
+AV_AUTH_TYPE = int(os.environ.get("OWLET_AV_AUTH_TYPE") or "0")
+AV_SYNC_RECV = int(os.environ.get("OWLET_AV_SYNC_RECV") or "0")
 
 FRAME_BUF = 1024 * 1024
 FINFO_BUF = 64
+IOTC_ER_ALREADY_INITIALIZED = -3
 AV_ER_DATA_NOREADY = -20012
 AV_ER_REMOTE_TIMEOUT_DISCONNECT = -20015
 AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
@@ -108,6 +116,44 @@ class St_IOTCConnectInput(Structure):
         ("lanModeDisable", c_byte),     # 0x9c
         ("p2pModeDisable", c_byte),     # 0x9d
         ("_pad", c_byte * 2),           # 0x9e -> 0xA0
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# St_AVClientStartInConfig / St_AVClientStartOutConfig — args to avClientStartEx,
+# the AV-layer login the Owlet app uses (com.owlet.tutk.AndroidTutkSdk.startClient).
+# Layout read straight out of the Owlet libAVAPIs.so (real avClientStartEx + its
+# JNI wrapper). Both carry a leading structSize the C side validates:
+#   IN  must be 0x40 (64);  OUT must be 0x20 (32).
+# Field offsets (IN): 0x04 session, 0x08 channel(byte), 0x0c timeout, 0x10 account*,
+#   0x18 password*, 0x20 resend, 0x24 security_mode, 0x28 auth_type,
+#   0x2c sync_recv_data, 0x30 dtls_cipher_suites*.
+# --------------------------------------------------------------------------- #
+class St_AVClientStartInConfig(Structure):
+    _fields_ = [
+        ("structSize", c_int),                  # 0x00 = 64
+        ("iotc_session_id", c_int),             # 0x04
+        ("iotc_channel_id", c_byte),            # 0x08 (byte)
+        ("_p08", c_byte * 3),                   # 0x09
+        ("timeout_sec", c_int),                 # 0x0c
+        ("account_or_identity", c_char_p),      # 0x10
+        ("password_or_token", c_char_p),        # 0x18
+        ("resend", c_int),                      # 0x20
+        ("security_mode", c_int),               # 0x24
+        ("auth_type", c_int),                   # 0x28
+        ("sync_recv_data", c_int),              # 0x2c
+        ("dtls_cipher_suites", c_char_p),       # 0x30
+        ("_r38", c_int),                        # 0x38
+        ("_r3c", c_int),                        # 0x3c  -> 0x40
+    ]
+
+
+class St_AVClientStartOutConfig(Structure):
+    # 32 bytes; the SDK only reads structSize (==0x20) on the way in and writes
+    # negotiated results (server_type, two_way_streaming, …) we don't need.
+    _fields_ = [
+        ("structSize", c_int),                  # 0x00 = 32
+        ("_rest", c_int * 7),                   # 0x04 -> 0x20
     ]
 
 
@@ -161,7 +207,7 @@ def smsg_av_stream(channel: int) -> bytes:
     return struct.pack("<I4s", channel, b"\x00\x00\x00\x00")
 
 
-def stream_once(uid: str) -> int:
+def stream_once(uid: str, sec_mode: int) -> int:
     iotc, av, tutk = load()
 
     # ---- bind signatures (critical on x86_64 — default int return truncates ptrs)
@@ -179,6 +225,8 @@ def stream_once(uid: str) -> int:
     _set_sig(av, "avClientStart2", c_int,
              [c_int, c_char_p, c_char_p, c_uint, POINTER(c_uint), c_ubyte,
               POINTER(c_uint)])
+    _set_sig(av, "avClientStartEx", c_int,
+             [POINTER(St_AVClientStartInConfig), POINTER(St_AVClientStartOutConfig)])
     _set_sig(av, "avSendIOCtrl", c_int, [c_int, c_uint, c_char_p, c_int])
     _set_sig(av, "avClientStop", c_int, [c_int])
     _set_sig(av, "avRecvFrameData2", c_int,
@@ -205,77 +253,118 @@ def stream_once(uid: str) -> int:
 
     rc = iotc.IOTC_Initialize2(0)
     log(f"IOTC_Initialize2 rc={rc}")
-    if rc < 0:
+    if rc < 0 and rc != IOTC_ER_ALREADY_INITIALIZED:
         return 3
     av.avInitialize(512)
 
-    sid = iotc.IOTC_Get_SessionID()
-    log(f"IOTC_Get_SessionID -> {sid}")
-    if sid < 0:
-        return 3
+    session = -1
+    av_idx = -1
+    try:
+        sid = iotc.IOTC_Get_SessionID()
+        log(f"IOTC_Get_SessionID -> {sid}")
+        if sid < 0:
+            return 3
 
-    log(f"connecting UID={uid} authKey={'yes' if AUTHKEY else 'no'} …")
-    ak = AUTHKEY.encode()
-    if AUTHKEY and len(ak) != 8:
-        log(f"WARNING: authKey is {len(ak)} chars; the SDK requires exactly 8 "
-            "(IOTC_Connect_ByUIDEx will reject it with -46)")
-    inp = St_IOTCConnectInput()
-    inp.structSize = 160               # 0xA0 — required size/version guard
-    inp.authenticationType = 0
-    inp.authKey = ak[:8]
-    inp.timeout = CONNECT_TIMEOUT
-    session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
-    log(f"IOTC_Connect_ByUIDEx -> {session}")
-    if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
-        # Fallback for cams that don't require the authKey.
-        session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
-        log(f"IOTC_Connect_ByUID_Parallel -> {session}")
-    if session < 0:
-        log(f"connect failed: {session}")
-        return 4
-    log(f"IOTC session={session}")
+        log(f"connecting UID={uid} authKey={'yes' if AUTHKEY else 'no'} …")
+        ak = AUTHKEY.encode()
+        if AUTHKEY and len(ak) != 8:
+            log(f"WARNING: authKey is {len(ak)} chars; the SDK requires exactly 8 "
+                "(IOTC_Connect_ByUIDEx will reject it with -46)")
+        inp = St_IOTCConnectInput()
+        inp.structSize = 160               # 0xA0 — required size/version guard
+        inp.authenticationType = 0
+        inp.authKey = ak[:8]
+        inp.timeout = CONNECT_TIMEOUT
+        session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
+        log(f"IOTC_Connect_ByUIDEx -> {session}")
+        if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
+            # Fallback for cams that don't require the authKey.
+            session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
+            log(f"IOTC_Connect_ByUID_Parallel -> {session}")
+        if session < 0:
+            log(f"connect failed: {session}")
+            return 4
+        log(f"IOTC session={session}")
 
-    serv = c_uint(0)
-    resend = c_uint(1)
+        av_idx = av_client_start(av, session, sec_mode)
+        if av_idx < 0:
+            return 5
+
+        payload = smsg_av_stream(AV_CHANNEL)
+        av.avSendIOCtrl(av_idx, IOTYPE_START, c_char_p(payload), len(payload))
+        log(f"sent IOTYPE_START={IOTYPE_START} payload={payload.hex()}")
+
+        buf = create_string_buffer(FRAME_BUF)
+        finfo = create_string_buffer(FINFO_BUF)
+        actual = c_int(0); expected = c_int(0); finfo_len = c_int(0); frmno = c_int(0)
+        out = sys.stdout.buffer
+        frames = 0
+        last_log = time.time()
+        while True:
+            rc = av.avRecvFrameData2(av_idx, buf, FRAME_BUF,
+                                     byref(actual), byref(expected),
+                                     finfo, FINFO_BUF, byref(finfo_len), byref(frmno))
+            if rc >= 0 and actual.value > 0:
+                out.write(buf.raw[:actual.value]); out.flush()
+                frames += 1
+                if time.time() - last_log > 10:
+                    log(f"{frames} frames forwarded"); last_log = time.time()
+            elif rc == AV_ER_DATA_NOREADY:
+                time.sleep(0.01)
+            elif rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                log(f"stream ended rc={rc}"); break
+            else:
+                time.sleep(0.02)
+        return 0
+    finally:
+        # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
+        # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
+        if av_idx >= 0:
+            av.avClientStop(av_idx)
+        if session >= 0:
+            iotc.IOTC_Session_Close(session)
+        av.avDeInitialize()
+        iotc.IOTC_DeInitialize()
+
+
+SEC_NAMES = {0: "Simple", 1: "Dtls", 2: "Auto"}
+
+
+def av_client_start(av: CDLL, session: int, mode: int) -> int:
+    """AV-layer login the Owlet app uses: avClientStartEx with the given DTLS
+    security mode. Falls back to the legacy scalar avClientStart2 if Ex is
+    missing from the lib."""
+    if hasattr(av, "avClientStartEx"):
+        cin = St_AVClientStartInConfig()
+        cin.structSize = 64
+        cin.iotc_session_id = session
+        cin.iotc_channel_id = AV_CHANNEL
+        cin.timeout_sec = CONNECT_TIMEOUT
+        cin.account_or_identity = AV_ACCOUNT
+        cin.password_or_token = AV_PASSWORD
+        cin.resend = 1
+        cin.security_mode = mode
+        cin.auth_type = AV_AUTH_TYPE
+        cin.sync_recv_data = AV_SYNC_RECV
+        cin.dtls_cipher_suites = None
+        cout = St_AVClientStartOutConfig()
+        cout.structSize = 32
+        av_idx = av.avClientStartEx(byref(cin), byref(cout))
+        log(f"avClientStartEx(security={SEC_NAMES.get(mode, mode)}, "
+            f"auth={AV_AUTH_TYPE}) -> {av_idx}")
+        if av_idx >= 0:
+            log(f"AV channel={av_idx}")
+        return av_idx
+
+    # Legacy fallback (no Ex export).
+    serv = c_uint(0); resend = c_uint(1)
     av_idx = av.avClientStart2(session, c_char_p(AV_ACCOUNT), c_char_p(AV_PASSWORD),
                               c_uint(CONNECT_TIMEOUT), byref(serv), c_ubyte(AV_CHANNEL),
                               byref(resend))
-    if av_idx < 0:
-        log(f"avClientStart2 failed: {av_idx} (check AV account/password)")
-        return 5
-    log(f"AV channel={av_idx} servType={serv.value}")
-
-    payload = smsg_av_stream(AV_CHANNEL)
-    av.avSendIOCtrl(av_idx, IOTYPE_START, c_char_p(payload), len(payload))
-    log(f"sent IOTYPE_START={IOTYPE_START} payload={payload.hex()}")
-
-    buf = create_string_buffer(FRAME_BUF)
-    finfo = create_string_buffer(FINFO_BUF)
-    actual = c_int(0); expected = c_int(0); finfo_len = c_int(0); frmno = c_int(0)
-    out = sys.stdout.buffer
-    frames = 0
-    last_log = time.time()
-    while True:
-        rc = av.avRecvFrameData2(av_idx, buf, FRAME_BUF,
-                                 byref(actual), byref(expected),
-                                 finfo, FINFO_BUF, byref(finfo_len), byref(frmno))
-        if rc >= 0 and actual.value > 0:
-            out.write(buf.raw[:actual.value]); out.flush()
-            frames += 1
-            if time.time() - last_log > 10:
-                log(f"{frames} frames forwarded"); last_log = time.time()
-        elif rc == AV_ER_DATA_NOREADY:
-            time.sleep(0.01)
-        elif rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
-            log(f"stream ended rc={rc}"); break
-        else:
-            time.sleep(0.02)
-
-    av.avClientStop(av_idx)
-    iotc.IOTC_Session_Close(session)
-    av.avDeInitialize()
-    iotc.IOTC_DeInitialize()
-    return 0
+    log(f"avClientStart2 -> {av_idx}")
+    if av_idx >= 0:
+        log(f"AV channel={av_idx} servType={serv.value}")
+    return av_idx
 
 
 def resolve_uid() -> str:
@@ -306,10 +395,21 @@ def resolve_uid() -> str:
 
 def main() -> None:
     uid = resolve_uid()
+    # Security mode to try. If pinned via env, use only that; otherwise cycle
+    # [Auto, Dtls, Simple] across reconnects — each on a FRESH session so a
+    # failed DTLS handshake on one mode can't poison the next attempt.
+    modes = [int(AV_SECURITY_MODE)] if AV_SECURITY_MODE != "" else [2, 1, 0]
+    i = 0
     while True:
+        mode = modes[i % len(modes)]
         try:
-            rc = stream_once(uid)
-            if rc != 0:
+            rc = stream_once(uid, mode)
+            if rc == 5:
+                # AV login failed for this security mode — advance to the next.
+                i += 1
+                log(f"AV login failed (security={SEC_NAMES.get(mode, mode)}); "
+                    f"trying {SEC_NAMES.get(modes[i % len(modes)])} next")
+            elif rc != 0:
                 log(f"exit rc={rc}; retry in 5s")
         except SystemExit:
             raise
