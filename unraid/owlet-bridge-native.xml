@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>owlet-bridge-native</Name>
+  <Repository>ghcr.io/btoth525/owlet-bridge-native:latest</Repository>
+  <Registry>https://github.com/btoth525/Owlet-To-Rtsp/pkgs/container/owlet-bridge-native</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/btoth525/Owlet-To-Rtsp</Support>
+  <Project>https://github.com/btoth525/Owlet-To-Rtsp/tree/main/native-bridge/bridge</Project>
+  <Overview>Native Owlet Cam -&gt; RTSP bridge, the docker-wyze-bridge way. NO emulator. Enter your Owlet account in the web control panel (http://[IP]:8088), it logs into the Owlet cloud, connects to the camera over ThroughTek/Kalay (TUTK), and serves the video as RTSP/WebRTC/HLS with a go2rtc UI (http://[IP]:1985). Point Frigate at rtsp://[IP]:18554/owlet.
+
+EVERYTHING is configured in the UI: account credentials, region, camera DSN/UID/AuthKey, AV settings. "Connect &amp; Diagnose" runs the real login and auto-fetches your camera key; a live log + status dashboard show exactly what's happening.
+
+LIBRARIES: the proprietary TUTK .so libs are not shipped. Easiest path — in the web UI's "TUTK libraries" card, click "Upload &amp; extract" and pick your Owlet .apkm/.apk; the bridge pulls the x86_64 libraries out itself (it also auto-extracts any APK left in the config folder).
+
+NOTE on networking: this uses standard Bridge networking. Host ports are offset (1985/18554/18555) so they don't collide with Frigate's built-in go2rtc (1984/8554/8555). Keep it on Bridge (not a br0/macvlan custom network) so other containers like Frigate can reach it.</Overview>
+  <Category>Tools: MediaApp:Video HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:8088]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/owlet-bridge-native.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/claude/unraid-gpu-template-cy1pi0/unraid/icon.png</Icon>
+  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="Control panel" Target="8088" Default="8088" Mode="tcp" Description="Web UI — enter Owlet login, upload libs, see status + logs." Type="Port" Display="always" Required="true" Mask="false">8088</Config>
+  <Config Name="Video UI (go2rtc)" Target="1984" Default="1985" Mode="tcp" Description="go2rtc UI — RTSP/WebRTC/HLS links + preview. Host 1985 to avoid Frigate's 1984." Type="Port" Display="always" Required="true" Mask="false">1985</Config>
+  <Config Name="RTSP" Target="8554" Default="18554" Mode="tcp" Description="rtsp://[IP]:18554/owlet — point Frigate here. Host 18554 to avoid Frigate's 8554." Type="Port" Display="always" Required="true" Mask="false">18554</Config>
+  <Config Name="WebRTC tcp" Target="8555" Default="18555" Mode="tcp" Description="WebRTC (host 18555 to avoid Frigate's 8555)." Type="Port" Display="advanced" Required="false" Mask="false">18555</Config>
+  <Config Name="WebRTC udp" Target="8555" Default="18555" Mode="udp" Description="WebRTC (host 18555 to avoid Frigate's 8555)." Type="Port" Display="advanced" Required="false" Mask="false">18555</Config>
+  <Config Name="PUBLIC_RTSP_PORT" Target="PUBLIC_RTSP_PORT" Default="18554" Mode="" Description="The HOST port you mapped RTSP (8554) to — so the UI shows reachable copy URLs. Match your RTSP port mapping above." Type="Variable" Display="advanced" Required="false" Mask="false">18554</Config>
+  <Config Name="PUBLIC_HTTP_PORT" Target="PUBLIC_HTTP_PORT" Default="1985" Mode="" Description="The HOST port you mapped the go2rtc UI (1984) to." Type="Variable" Display="advanced" Required="false" Mask="false">1985</Config>
+  <Config Name="PUBLIC_WEBRTC_PORT" Target="PUBLIC_WEBRTC_PORT" Default="18555" Mode="" Description="The HOST port you mapped WebRTC (8555) to." Type="Variable" Display="advanced" Required="false" Mask="false">18555</Config>
+  <Config Name="Config (settings)" Target="/config" Default="/mnt/user/appdata/owlet/config" Mode="rw" Description="Persists your UI settings + camera key. Drop your Owlet .apkm here too (or upload it in the UI)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/config</Config>
+  <Config Name="TUTK libs (/app/libs)" Target="/app/libs" Default="/mnt/user/appdata/owlet/libs" Mode="rw" Description="Folder the extracted x86_64 TUTK .so libraries live in (under x86_64/). The UI's Upload &amp; extract writes them here." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/owlet/libs</Config>
+</Container>

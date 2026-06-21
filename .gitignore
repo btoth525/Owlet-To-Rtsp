@@ -1,0 +1,19 @@
+# Local environment (copy of .env.example with your values)
+.env
+
+# Owlet APK — do not commit
+*.apk
+
+# Captured frames used to measure crop coords
+frame*.png
+*.scratch
+
+# native-bridge: proprietary TUTK libs + private captures — never commit
+native-bridge/bridge/libs/**/*.so
+native-bridge/mitm/captures/
+native-bridge/mitm/mitm-data/
+frida-server-*
+
+# Python caches
+__pycache__/
+*.pyc
