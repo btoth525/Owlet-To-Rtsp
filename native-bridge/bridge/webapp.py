@@ -345,18 +345,32 @@ def status():
     have_uid = bool(cfg.get("uid"))
     have_libs = _have_libs()
     stream_up = False
+    codec = ""
+    recv = 0
     try:
         r = requests.get(f"{GO2RTC_API}/api/streams", timeout=4)
         if r.ok:
-            data = r.json()
-            owl = data.get("owlet") or {}
-            stream_up = bool(owl.get("producers"))
+            owl = (r.json() or {}).get("owlet") or {}
+            prods = owl.get("producers") or []
+            stream_up = bool(prods)
+            for p in prods:
+                try:
+                    recv += int(p.get("recv") or 0)
+                except (TypeError, ValueError):
+                    pass
+                for m in (p.get("medias") or []):
+                    ml = str(m).lower()
+                    if "h265" in ml or "265" in ml:
+                        codec = "H.265"
+                    elif "h264" in ml or "264" in ml:
+                        codec = codec or "H.264"
     except Exception:  # noqa: BLE001
         pass
     return jsonify({
         "have_login": have_login, "have_uid": have_uid, "have_libs": have_libs,
         "stream_up": stream_up, "busy": STATE["busy"],
         "config_writable": os.access(os.path.dirname(CONFIG_PATH), os.W_OK),
+        "stream_codec": codec, "stream_recv": recv,
     })
 
 

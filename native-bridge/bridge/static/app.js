@@ -122,6 +122,31 @@ function uploadApk() {
 
 /* ---------- status / stream ---------- */
 function setPill(id, state){ const el = $(id); if (el) el.className = "pill " + state; }
+function fmtBytes(n){ if(!n) return ""; const u=["B","KB","MB","GB"]; let i=0;
+  while(n>=1024&&i<3){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
+function updateSetup(s){
+  const steps = [["libs",s.have_libs],["login",s.have_login],["uid",s.have_uid],["stream",s.stream_up]];
+  let activeSet=false, allDone=true;
+  for (const [name,done] of steps){
+    const li=document.querySelector(`#checklist li[data-step="${name}"]`); if(!li) continue;
+    li.classList.remove("done","active","pending");
+    if(done) li.classList.add("done");
+    else if(!activeSet){ li.classList.add("active"); activeSet=true; allDone=false; }
+    else { li.classList.add("pending"); allDone=false; }
+  }
+  $("setup").classList.toggle("complete", allDone);
+  const fresh = !s.have_libs && !s.have_login;
+  $("setup-title").textContent = allDone ? "🦉 Owlet bridge"
+    : (fresh ? "👋 First time? Let's get your camera streaming" : "🚀 Get your camera streaming");
+}
+function updateStats(s){
+  const el=$("stream-stats"); if(!el) return;
+  if(!s.stream_up){ el.innerHTML=""; return; }
+  let h=`<span class="chip ok">● live</span>`;
+  if(s.stream_codec) h+=`<span class="chip">${s.stream_codec}</span>`;
+  if(s.stream_recv) h+=`<span class="chip">${fmtBytes(s.stream_recv)}</span>`;
+  el.innerHTML=h;
+}
 function banner(kind, ico, html){
   return `<div class="banner ${kind}"><span class="ico">${ico}</span><div>${html}</div></div>`;
 }
@@ -138,6 +163,8 @@ async function refreshStatus() {
   $("card-account").classList.toggle("done", s.have_login);
   $("card-camera").classList.toggle("done", s.have_uid);
   $("card-libs").classList.toggle("done", s.have_libs);
+  updateSetup(s);
+  updateStats(s);
 
   $("u-rtsp").textContent = `rtsp://${host}:8554/owlet`;
   $("u-web").textContent  = `http://${host}:1984/stream.html?src=owlet`;

@@ -20,9 +20,25 @@
   </header>
 
   <main>
+    <!-- ============ SETUP CHECKLIST ============ -->
+    <section class="card setup" id="setup">
+      <h2 id="setup-title">🚀 Get your camera streaming</h2>
+      <p class="hint" id="setup-sub">Three quick steps — this panel tracks your progress and tucks away when you're done.</p>
+      <ol class="checklist" id="checklist">
+        <li data-step="libs"><span class="ck"></span><div><b>Provide the TUTK libraries</b>
+          <span class="do">Upload your Owlet APK in the Libraries card below.</span></div></li>
+        <li data-step="login"><span class="ck"></span><div><b>Sign in to Owlet</b>
+          <span class="do">Enter your email, password &amp; Camera DSN in step 1.</span></div></li>
+        <li data-step="uid"><span class="ck"></span><div><b>Fetch your camera key</b>
+          <span class="do">Click <b>Connect &amp; Diagnose</b> — it auto-fills the rest.</span></div></li>
+        <li data-step="stream"><span class="ck"></span><div><b>Start streaming</b>
+          <span class="do">Click <b>Save &amp; (re)start stream</b>.</span></div></li>
+      </ol>
+    </section>
+
     <!-- ============ STREAM ============ -->
     <section class="card">
-      <h2>📺 Your stream</h2>
+      <h2>📺 Your stream <span class="spacer"></span><span class="stats" id="stream-stats"></span></h2>
       <div class="hero">
         <div class="preview" id="preview">
           <img id="preview-img" alt="camera preview">
