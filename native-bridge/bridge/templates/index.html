@@ -39,28 +39,20 @@
     <!-- ============ STREAM ============ -->
     <section class="card">
       <h2>📺 Your stream <span class="spacer"></span><span class="stats" id="stream-stats"></span></h2>
-      <div class="hero">
-        <div class="preview" id="preview">
-          <img id="preview-img" alt="camera preview">
-          <div class="ph" id="preview-ph">No video yet</div>
-        </div>
-        <div>
-          <span class="live-badge" id="live-badge"><span class="dot"></span><span id="live-text">offline</span></span>
-          <div class="urls">
-            <div class="url-row"><span class="lbl">RTSP</span><code id="u-rtsp">—</code>
-              <button class="mini" data-copy="u-rtsp">copy</button></div>
-            <div class="url-row"><span class="lbl">WebRTC</span><code id="u-web">—</code>
-              <button class="mini" data-copy="u-web">copy</button></div>
-            <div class="url-row"><span class="lbl">HLS</span><code id="u-hls">—</code>
-              <button class="mini" data-copy="u-hls">copy</button></div>
-          </div>
-          <div class="row">
-            <a class="btn" id="go2rtc-link" href="#" target="_blank">Open video UI ↗</a>
-            <button id="btn-restart">↻ Restart stream</button>
-          </div>
-          <div id="stream-banner"></div>
-        </div>
+      <span class="live-badge" id="live-badge"><span class="dot"></span><span id="live-text">offline</span></span>
+      <div class="urls">
+        <div class="url-row"><span class="lbl">RTSP</span><code id="u-rtsp">—</code>
+          <button class="mini" data-copy="u-rtsp">copy</button></div>
+        <div class="url-row"><span class="lbl">WebRTC</span><code id="u-web">—</code>
+          <button class="mini" data-copy="u-web">copy</button></div>
+        <div class="url-row"><span class="lbl">HLS</span><code id="u-hls">—</code>
+          <button class="mini" data-copy="u-hls">copy</button></div>
       </div>
+      <div class="row">
+        <button class="btn" id="go2rtc-link">Open video UI ↗</button>
+        <button id="btn-restart">↻ Restart stream</button>
+      </div>
+      <div id="stream-banner"></div>
     </section>
 
     <!-- ============ STEP 1 — ACCOUNT ============ -->

@@ -23,4 +23,8 @@ streams:
     #     decode nothing. Letting ffmpeg analyze the input first fixes that.
     #   - generous analyzeduration/probesize so it reliably locks onto the first
     #     keyframe before declaring the stream.
-    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
+    #   - `-use_wallclock_as_timestamps 1`: the raw H.264 has no timestamps, so
+    #     ffmpeg would otherwise assume a perfect 25fps; when P2P frames arrive
+    #     bursty the fake PTS drifts and the stream stutters/drops. Stamping each
+    #     frame with real arrival time keeps it smooth + stable.
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'

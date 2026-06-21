@@ -167,24 +167,15 @@ async function refreshStatus() {
   updateStats(s);
 
   const rp = s.rtsp_port || "8554", hp = s.http_port || "1984";
+  window._go2rtcUrl = `http://${host}:${hp}/`;
   $("u-rtsp").textContent = `rtsp://${host}:${rp}/owlet`;
   $("u-web").textContent  = `http://${host}:${hp}/stream.html?src=owlet`;
   $("u-hls").textContent  = `http://${host}:${hp}/api/stream.m3u8?src=owlet`;
   $("rtsp-hint").textContent = `rtsp://${host}:${rp}/owlet`;
-  const gl = $("go2rtc-link"); if (gl) gl.href = `http://${host}:${hp}/`;
 
   const lb = $("live-badge"), lt = $("live-text");
   lb.classList.toggle("live", s.stream_up);
   lt.textContent = s.stream_up ? "live" : "offline";
-  const img = $("preview-img"), ph = $("preview-ph");
-  if (s.stream_up) {
-    img.style.display = "block"; ph.style.display = "none";
-    // proxied through this control panel's own origin so it works whatever host
-    // port go2rtc is mapped to.
-    img.src = `/api/frame.jpeg?t=${Date.now()}`;
-  } else {
-    img.style.display = "none"; ph.style.display = "block";
-  }
 
   const sb = $("stream-banner");
   if (!s.config_writable) {
@@ -192,13 +183,10 @@ async function refreshStatus() {
       "The config folder isn't writable. On Unraid: <code>chmod -R 777 /mnt/user/appdata/owlet/config</code> then restart.");
   } else if (!s.have_libs) {
     sb.innerHTML = banner("warn", "🧩", "TUTK libraries missing — see the <b>TUTK libraries</b> section below.");
-    ph.textContent = "Libraries missing";
   } else if (!s.have_uid) {
     sb.innerHTML = banner("warn", "🔑", "Enter your account + Camera DSN in step 1 and click <b>Connect &amp; Diagnose</b>.");
-    ph.textContent = "No camera key yet";
   } else if (!s.stream_up) {
     sb.innerHTML = banner("", "⏳", "Credentials are set. Click <b>Restart stream</b> — the first connect takes ~10s.");
-    ph.textContent = "Connecting…";
   } else {
     sb.innerHTML = banner("good", "✅", "Live. Point Frigate at the RTSP URL above.");
   }
@@ -228,11 +216,24 @@ async function discover(btn) {
   });
 }
 
-/* ---------- copy buttons ---------- */
-document.addEventListener("click", (e) => {
+/* ---------- copy (works on plain http too, where navigator.clipboard is blocked) ---------- */
+async function copyText(text){
+  try {
+    if (navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(text); return true; }
+  } catch(e){}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly","");
+    ta.style.position="fixed"; ta.style.top="-1000px"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy"); document.body.removeChild(ta); return ok;
+  } catch(e){ return false; }
+}
+document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-copy]"); if (!b) return;
-  const txt = $(b.dataset.copy).textContent;
-  navigator.clipboard.writeText(txt).then(() => { const o=b.textContent; b.textContent="copied!"; setTimeout(()=>b.textContent=o,1200); });
+  const ok = await copyText($(b.dataset.copy).textContent);
+  const o = b.textContent; b.textContent = ok ? "copied!" : "select & copy";
+  setTimeout(() => b.textContent = o, 1300);
 });
 
 /* ---------- wire up ---------- */
@@ -245,8 +246,16 @@ $("btn-discover").onclick = (e) => discover(e.currentTarget);
 $("btn-restart").onclick = (e) => withLoading(e.currentTarget, async () => {
   await fetch("/api/stream/restart", {method:"POST"}); toast("Stream restarting…", ""); setTimeout(refreshStatus, 1500);
 });
+$("go2rtc-link").onclick = () => {
+  const url = window._go2rtcUrl || `http://${location.hostname}:1985/`;
+  const w = window.open(url, "_blank", "noopener");
+  if (!w) { copyText(url); toast("Popup blocked — URL copied, paste it in a new tab.", "warn"); }
+};
 $("btn-clear").onclick = () => $("log").textContent = "";
-$("btn-copy").onclick  = () => navigator.clipboard.writeText($("log").textContent).then(()=>toast("Log copied.", "good"));
+$("btn-copy").onclick  = async () => {
+  const ok = await copyText($("log").textContent);
+  toast(ok ? "Log copied." : "Couldn't copy — select the text and Ctrl+C.", ok ? "good" : "warn");
+};
 
 loadConfig();
 startLogStream();
