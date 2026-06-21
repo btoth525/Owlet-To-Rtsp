@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const FIELDS = ["region","email","password","camera_dsn","uid","authkey","av_account","av_password","iotype_start","av_channel"];
+const FIELDS = ["region","email","password","camera_dsn","uid","authkey","av_account","av_password","iotype_start","av_channel","license_key","region_code"];
 
 function collect() {
   const o = {};

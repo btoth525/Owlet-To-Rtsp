@@ -48,6 +48,8 @@ DEFAULTS = {
     "av_password": "",
     "iotype_start": "0x01FF",
     "av_channel": "0",
+    "license_key": "",
+    "region_code": "",
 }
 
 LOG: deque[str] = deque(maxlen=6000)

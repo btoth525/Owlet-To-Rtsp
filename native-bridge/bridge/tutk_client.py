@@ -32,6 +32,11 @@ AV_ACCOUNT = os.environ.get("OWLET_AV_ACCOUNT", "admin").encode()
 AV_PASSWORD = os.environ.get("OWLET_AV_PASSWORD", "").encode()
 IOTYPE_START = int(os.environ.get("OWLET_IOTYPE_START", "0x01FF"), 0)
 AV_CHANNEL = int(os.environ.get("OWLET_AV_CHANNEL", "0"))
+# Newer Kalay SDK (libTUTKGlobalAPIs) must be licensed + region-set BEFORE any
+# IOTC call, or IOTC_Connect hangs forever. The Owlet app calls these.
+LICENSE_KEY = os.environ.get("OWLET_LICENSE_KEY", "")
+REGION_CODE = os.environ.get("OWLET_REGION_CODE", "")        # numeric, e.g. 0/1/2/3
+CONNECT_METHOD = os.environ.get("OWLET_CONNECT_METHOD", "auto")  # auto|byuidex|parallel
 
 FRAME_BUF = 1024 * 1024
 FINFO_BUF = 64
@@ -73,23 +78,41 @@ def smsg_av_stream(channel: int) -> bytes:
 def stream_once(uid: str) -> int:
     iotc, av = load()
 
-    if iotc.IOTC_Initialize2(0) < 0:
-        log("IOTC_Initialize2 failed"); return 3
+    # --- license + region the newer Kalay SDK requires BEFORE init -----------
+    try:
+        tutk = CDLL(os.path.join(LIB_DIR, "libTUTKGlobalAPIs.so"), mode=ctypes.RTLD_GLOBAL)
+    except OSError:
+        tutk = None
+    if LICENSE_KEY and tutk is not None and hasattr(tutk, "TUTK_SDK_Set_License_Key"):
+        rc = tutk.TUTK_SDK_Set_License_Key(c_char_p(LICENSE_KEY.encode()))
+        log(f"TUTK_SDK_Set_License_Key rc={rc}")
+    elif not LICENSE_KEY:
+        log("WARNING: OWLET_LICENSE_KEY not set — newer Kalay SDK will likely hang on connect")
+    if REGION_CODE and tutk is not None and hasattr(tutk, "TUTK_SDK_Set_Region_Code"):
+        rc = tutk.TUTK_SDK_Set_Region_Code(c_int(int(REGION_CODE)))
+        log(f"TUTK_SDK_Set_Region_Code({REGION_CODE}) rc={rc}")
+
+    rc = iotc.IOTC_Initialize2(0)
+    log(f"IOTC_Initialize2 rc={rc}")
+    if rc < 0:
+        return 3
     av.avInitialize(4)
 
     sid = iotc.IOTC_Get_SessionID()
+    log(f"IOTC_Get_SessionID -> {sid}")
     if sid < 0:
-        log("IOTC_Get_SessionID failed"); return 3
+        return 3
 
-    log(f"connecting UID={uid} (authKey={'yes' if AUTHKEY else 'no'}) …")
-    # The Owlet app uses IOTC_Connect_ByUIDEx(UID, authKey, ...). Try that with
-    # the AuthKey first; fall back to the AuthKey-less parallel connect.
+    log(f"connecting UID={uid} (authKey={'yes' if AUTHKEY else 'no'}) method={CONNECT_METHOD} …")
     session = -1
-    if AUTHKEY and hasattr(iotc, "IOTC_Connect_ByUIDEx"):
+    use_ex = CONNECT_METHOD in ("auto", "byuidex") and AUTHKEY and hasattr(iotc, "IOTC_Connect_ByUIDEx")
+    if use_ex:
         session = iotc.IOTC_Connect_ByUIDEx(c_char_p(uid.encode()),
                                             c_char_p(AUTHKEY.encode()), None)
-    if session < 0:
+        log(f"IOTC_Connect_ByUIDEx -> {session}")
+    if session < 0 and CONNECT_METHOD in ("auto", "parallel"):
         session = iotc.IOTC_Connect_ByUID_Parallel(c_char_p(uid.encode()), sid)
+        log(f"IOTC_Connect_ByUID_Parallel -> {session}")
     if session < 0:
         log(f"connect failed: {session}"); return 4
     log(f"IOTC session={session}")
