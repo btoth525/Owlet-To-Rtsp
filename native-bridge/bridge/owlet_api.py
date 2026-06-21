@@ -42,6 +42,9 @@ REGIONS: dict[str, dict[str, str]] = {
 FIREBASE_URL = ("https://www.googleapis.com/identitytoolkit/v3/relyingparty/"
                 "verifyPassword?key={key}")
 MINI_URL = "https://ayla-sso.owletdata.com/mini/"
+# Camera Key-Management Service: returns the Kalay tutkid/UID + AuthKey + AV
+# password for a camera DSN, authorized with the raw Firebase idToken.
+KMS_URL = "https://camera-kms.owletdata.com/kms/{dsn}"
 
 # Owlet's Firebase API key is restricted to the official Android app, so Google
 # requires the app's identity headers or it returns 403 "Requests from this
@@ -80,6 +83,7 @@ class OwletAPI:
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": "OwletCare/Android"})
         self.access_token: str | None = None
+        self.firebase_token: str | None = None
 
     # -- step 1: Firebase ---------------------------------------------------
     def _firebase(self) -> str:
@@ -98,8 +102,34 @@ class OwletAPI:
         jwt = r.json().get("idToken")
         if not jwt:
             raise OwletError("Firebase returned no idToken")
+        self.firebase_token = jwt
         self.log(f"      OK idToken={_mask(jwt)}")
         return jwt
+
+    # -- camera credentials: KMS (needs only the Firebase idToken) ---------
+    def camera_credentials(self, dsn: str) -> dict:
+        """GET the Kalay UID + AuthKey + AV password for a camera DSN.
+
+        Returns {"uid", "authkey", "av_password"}. Only needs the Firebase
+        idToken (so a plain login is enough — no Ayla sign-in required).
+        """
+        if not self.firebase_token:
+            self._firebase()
+        url = KMS_URL.format(dsn=dsn)
+        self.log(f"[kms] GET camera key for {dsn} …")
+        r = self.s.get(url, headers={"Authorization": self.firebase_token}, timeout=20)
+        if r.status_code != 200:
+            self.log(f"      KMS HTTP {r.status_code}: {r.text[:200]}")
+            raise OwletError(f"camera KMS failed ({r.status_code})")
+        d = r.json()
+        uid = d.get("tutkid") or d.get("uid")
+        authkey = d.get("authKey") or d.get("authkey")
+        pw = d.get("password")
+        if not uid:
+            raise OwletError(f"KMS response had no tutkid: {list(d)}")
+        self.log(f"      OK uid={uid} authKey={_mask(authkey or '')} "
+                 f"password={_mask(pw or '')}")
+        return {"uid": uid, "authkey": authkey, "av_password": pw}
 
     # -- step 2: Ayla SSO mini token ---------------------------------------
     def _mini(self, jwt: str) -> str:

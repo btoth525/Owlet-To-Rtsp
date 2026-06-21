@@ -37,6 +37,7 @@ DEFAULTS = {
     "email": "",
     "password": "",
     "camera_name": "",
+    "camera_dsn": "",
     "uid": "",
     "authkey": "",
     "av_account": "admin",
@@ -120,6 +121,23 @@ def _diagnose_worker(cfg: dict):
             log(f"!! login failed: {e}")
         except Exception as e:  # noqa: BLE001
             log(f"!! unexpected error: {e}")
+
+        # Fetch the camera's Kalay credentials from the KMS (needs only login).
+        dsn = (cfg.get("camera_dsn") or "").strip()
+        if dsn:
+            try:
+                creds = api.camera_credentials(dsn)
+                cfg["uid"] = creds["uid"]
+                cfg["authkey"] = creds.get("authkey") or ""
+                if creds.get("av_password"):
+                    cfg["av_password"] = creds["av_password"]
+                save_config(cfg)
+                log("[kms] saved UID / AuthKey / AV password to settings. "
+                    "Click 'Save & (re)start stream'.")
+            except Exception as e:  # noqa: BLE001
+                log(f"[kms] could not fetch camera key: {e}")
+        else:
+            log("[kms] set 'Camera DSN' (e.g. OCD…) to auto-fetch the camera key.")
     finally:
         STATE["busy"] = False
 

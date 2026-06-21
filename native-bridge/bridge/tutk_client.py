@@ -70,11 +70,14 @@ def stream_once(uid: str) -> int:
     if sid < 0:
         log("IOTC_Get_SessionID failed"); return 3
 
-    log(f"connecting UID={uid} …")
-    if AUTHKEY and hasattr(iotc, "IOTC_Connect_ByUID_Parallel2"):
-        session = iotc.IOTC_Connect_ByUID_Parallel2(c_char_p(uid.encode()), sid,
-                                                     c_char_p(AUTHKEY.encode()))
-    else:
+    log(f"connecting UID={uid} (authKey={'yes' if AUTHKEY else 'no'}) …")
+    # The Owlet app uses IOTC_Connect_ByUIDEx(UID, authKey, ...). Try that with
+    # the AuthKey first; fall back to the AuthKey-less parallel connect.
+    session = -1
+    if AUTHKEY and hasattr(iotc, "IOTC_Connect_ByUIDEx"):
+        session = iotc.IOTC_Connect_ByUIDEx(c_char_p(uid.encode()),
+                                            c_char_p(AUTHKEY.encode()), None)
+    if session < 0:
         session = iotc.IOTC_Connect_ByUID_Parallel(c_char_p(uid.encode()), sid)
     if session < 0:
         log(f"connect failed: {session}"); return 4
@@ -122,23 +125,28 @@ def stream_once(uid: str) -> int:
 
 
 def resolve_uid() -> str:
+    global AUTHKEY, AV_PASSWORD
     if UID:
         return UID
-    # Try the cloud (best-effort) if creds are present.
+    # No UID set — fetch it (+AuthKey +AV password) from the Owlet camera KMS,
+    # which needs only the account login and the camera DSN.
+    dsn = os.environ.get("OWLET_CAMERA_DSN", "").strip()
     email = os.environ.get("OWLET_EMAIL"); pw = os.environ.get("OWLET_PASSWORD")
     region = os.environ.get("OWLET_REGION", "world")
-    if email and pw:
+    if dsn and email and pw:
         try:
             from owlet_api import OwletAPI
             api = OwletAPI(region, email, pw, log=lambda m: log(m))
-            res = api.diagnose()
-            for c in res["candidates"]:
-                if "uid" in c["field"].lower() and len(str(c["value"])) >= 16:
-                    log(f"using discovered UID candidate {c['value']} from {c['field']}")
-                    return str(c["value"])
+            creds = api.camera_credentials(dsn)
+            if creds.get("authkey"):
+                AUTHKEY = creds["authkey"]
+            if creds.get("av_password"):
+                AV_PASSWORD = creds["av_password"].encode()
+            log(f"resolved UID {creds['uid']} from KMS")
+            return creds["uid"]
         except Exception as e:  # noqa: BLE001
-            log(f"cloud UID resolve failed: {e}")
-    log("No OWLET_UID set and none discovered. Set it in the web UI.")
+            log(f"KMS resolve failed: {e}")
+    log("No OWLET_UID set and none resolved. Set the Camera DSN + login in the UI.")
     sys.exit(1)
 
 
