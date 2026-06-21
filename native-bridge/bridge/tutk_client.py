@@ -81,27 +81,33 @@ AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
 # --------------------------------------------------------------------------- #
 # St_IOTCConnectInput — the struct IOTC_Connect_ByUIDEx() takes as arg 3.
 #
-# jadx lists the Java mirror's fields alphabetically (authKey, authenticationType,
-# dataTransmitMode, deviceRegion, lanModeDisable, p2pModeDisable, timeout) which is
-# NOT the C declaration order. The layout below is the canonical ThroughTek
-# IOTCAPIs.h order. We over-allocate a trailing reserved[] so the native side
-# never reads past our allocation even if its real struct is a little larger.
+# This layout is NOT a guess: it was read straight out of the Owlet x86_64
+# libIOTCAPIs.so by disassembling both the real IOTC_Connect_ByUIDEx() and its
+# JNI wrapper. The exact offsets / sizes the binary enforces:
 #
-# The app only ever sets authenticationType=0, authKey=<token>, timeout=20 and
-# leaves everything else zero, so only those three offsets must be correct.
+#   0x00 int  structSize         -- MUST equal 0xA0 (160); the C function does
+#                                   `cmp [rdx],0xA0; jne -> return -46` first.
+#   0x04 int  authenticationType -- must be 0 for the password path.
+#   0x08 char authKey[8]         -- the JNI checks strlen(authKey)==8 exactly
+#                                   (the Owlet KMS AuthKey is 8 chars).
+#   0x10 char deviceRegion[132]  -- left empty.
+#   0x94 int  timeout            -- seconds.
+#   0x98 int  dataTransmitMode   -- 0 (validated <=2, !=1).
+#   0x9c byte lanModeDisable
+#   0x9d byte p2pModeDisable
+#   total sizeof == 0xA0 (160).
 # --------------------------------------------------------------------------- #
 class St_IOTCConnectInput(Structure):
-    _pack_ = 4
     _fields_ = [
-        ("authKey", c_char * 20),
-        ("authenticationType", c_int),
-        ("deviceRegion", c_char * 8),
-        ("lanModeDisable", c_byte),
-        ("p2pModeDisable", c_byte),
-        ("dataTransmitMode", c_byte),
-        ("_pad0", c_byte),
-        ("timeout", c_int),
-        ("reserved", c_int * 16),
+        ("structSize", c_int),          # 0x00  must be 160
+        ("authenticationType", c_int),  # 0x04
+        ("authKey", c_char * 8),        # 0x08  exactly 8 chars
+        ("deviceRegion", c_char * 132), # 0x10
+        ("timeout", c_int),             # 0x94
+        ("dataTransmitMode", c_int),    # 0x98
+        ("lanModeDisable", c_byte),     # 0x9c
+        ("p2pModeDisable", c_byte),     # 0x9d
+        ("_pad", c_byte * 2),           # 0x9e -> 0xA0
     ]
 
 
@@ -209,9 +215,14 @@ def stream_once(uid: str) -> int:
         return 3
 
     log(f"connecting UID={uid} authKey={'yes' if AUTHKEY else 'no'} …")
+    ak = AUTHKEY.encode()
+    if AUTHKEY and len(ak) != 8:
+        log(f"WARNING: authKey is {len(ak)} chars; the SDK requires exactly 8 "
+            "(IOTC_Connect_ByUIDEx will reject it with -46)")
     inp = St_IOTCConnectInput()
+    inp.structSize = 160               # 0xA0 — required size/version guard
     inp.authenticationType = 0
-    inp.authKey = AUTHKEY.encode()[:19]
+    inp.authKey = ak[:8]
     inp.timeout = CONNECT_TIMEOUT
     session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
     log(f"IOTC_Connect_ByUIDEx -> {session}")
