@@ -166,11 +166,12 @@ async function refreshStatus() {
   updateSetup(s);
   updateStats(s);
 
-  $("u-rtsp").textContent = `rtsp://${host}:8554/owlet`;
-  $("u-web").textContent  = `http://${host}:1984/stream.html?src=owlet`;
-  $("u-hls").textContent  = `http://${host}:1984/api/stream.m3u8?src=owlet`;
-  $("rtsp-hint").textContent = `rtsp://${host}:8554/owlet`;
-  const gl = $("go2rtc-link"); if (gl) gl.href = `http://${host}:1984/`;
+  const rp = s.rtsp_port || "8554", hp = s.http_port || "1984";
+  $("u-rtsp").textContent = `rtsp://${host}:${rp}/owlet`;
+  $("u-web").textContent  = `http://${host}:${hp}/stream.html?src=owlet`;
+  $("u-hls").textContent  = `http://${host}:${hp}/api/stream.m3u8?src=owlet`;
+  $("rtsp-hint").textContent = `rtsp://${host}:${rp}/owlet`;
+  const gl = $("go2rtc-link"); if (gl) gl.href = `http://${host}:${hp}/`;
 
   const lb = $("live-badge"), lt = $("live-text");
   lb.classList.toggle("live", s.stream_up);
@@ -178,7 +179,9 @@ async function refreshStatus() {
   const img = $("preview-img"), ph = $("preview-ph");
   if (s.stream_up) {
     img.style.display = "block"; ph.style.display = "none";
-    img.src = `http://${host}:1984/api/frame.jpeg?src=owlet&t=${Date.now()}`;
+    // proxied through this control panel's own origin so it works whatever host
+    // port go2rtc is mapped to.
+    img.src = `/api/frame.jpeg?t=${Date.now()}`;
   } else {
     img.style.display = "none"; ph.style.display = "block";
   }

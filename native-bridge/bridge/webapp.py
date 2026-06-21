@@ -38,6 +38,12 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/owlet.yaml")
 ENV_PATH = os.environ.get("ENV_PATH", "/config/owlet.env")
 GO2RTC_API = os.environ.get("GO2RTC_API", "http://127.0.0.1:1984")
 TUTK_LIB_DIR = os.environ.get("TUTK_LIB_DIR", "/app/libs/x86_64")
+# Host-facing ports for the copy URLs shown in the UI. Default to the in-container
+# ports; set these to the mapped host ports (e.g. 18554/1985/18555) when they're
+# remapped to coexist with Frigate, so the UI shows reachable URLs.
+PUBLIC_HTTP_PORT = os.environ.get("PUBLIC_HTTP_PORT", "1984")
+PUBLIC_RTSP_PORT = os.environ.get("PUBLIC_RTSP_PORT", "8554")
+PUBLIC_WEBRTC_PORT = os.environ.get("PUBLIC_WEBRTC_PORT", "8555")
 
 # The TUTK license key + US region (3) are baked into the Owlet Android app and
 # recovered by decompiling it; pre-fill them so the camera connects out of the box.
@@ -371,7 +377,21 @@ def status():
         "stream_up": stream_up, "busy": STATE["busy"],
         "config_writable": os.access(os.path.dirname(CONFIG_PATH), os.W_OK),
         "stream_codec": codec, "stream_recv": recv,
+        "rtsp_port": PUBLIC_RTSP_PORT, "http_port": PUBLIC_HTTP_PORT,
+        "webrtc_port": PUBLIC_WEBRTC_PORT,
     })
+
+
+@app.get("/api/frame.jpeg")
+def frame_proxy():
+    """Proxy a snapshot from go2rtc through the control panel's own origin/port so
+    the preview works regardless of how go2rtc's host port is mapped."""
+    try:
+        r = requests.get(f"{GO2RTC_API}/api/frame.jpeg", params={"src": "owlet"}, timeout=6)
+        return Response(r.content, status=r.status_code,
+                        mimetype=r.headers.get("Content-Type", "image/jpeg"))
+    except Exception:  # noqa: BLE001
+        return Response(status=502)
 
 
 @app.post("/api/extract_libs")
