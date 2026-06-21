@@ -62,11 +62,14 @@ UID = os.environ.get("OWLET_UID", "")
 AUTHKEY = os.environ.get("OWLET_AUTHKEY", "")
 AV_ACCOUNT = os.environ.get("OWLET_AV_ACCOUNT", "admin").encode()
 AV_PASSWORD = os.environ.get("OWLET_AV_PASSWORD", "").encode()
-IOTYPE_START = int(os.environ.get("OWLET_IOTYPE_START", "511"), 0)   # 0x01FF
-AV_CHANNEL = int(os.environ.get("OWLET_AV_CHANNEL", "0"))
+# `or "<default>"` (not the .get default) so an env var present-but-empty — which
+# is exactly what an older saved /config/owlet.env contains — falls back cleanly
+# instead of crashing on int("").
+IOTYPE_START = int(os.environ.get("OWLET_IOTYPE_START") or "511", 0)   # 0x01FF
+AV_CHANNEL = int(os.environ.get("OWLET_AV_CHANNEL") or "0")
 LICENSE_KEY = os.environ.get("OWLET_LICENSE_KEY") or APP_LICENSE_KEY
-REGION_CODE = int(os.environ.get("OWLET_REGION_CODE", "3"))          # 3 = REGION_US
-CONNECT_TIMEOUT = int(os.environ.get("OWLET_CONNECT_TIMEOUT", "20"))
+REGION_CODE = int(os.environ.get("OWLET_REGION_CODE") or "3")          # 3 = REGION_US
+CONNECT_TIMEOUT = int(os.environ.get("OWLET_CONNECT_TIMEOUT") or "20")
 
 FRAME_BUF = 1024 * 1024
 FINFO_BUF = 64

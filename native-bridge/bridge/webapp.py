@@ -92,7 +92,14 @@ def load_config() -> dict:
                     continue
                 k, _, v = line.partition(":")
                 data[k.strip()] = v.strip().strip("\"'")
-        cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
+        for k, v in data.items():
+            if k not in DEFAULTS:
+                continue
+            # Don't let an empty saved value clobber a baked-in default (license
+            # key / region_code), which older configs stored as "".
+            if (v is None or v == "") and DEFAULTS.get(k):
+                continue
+            cfg[k] = v
     return cfg
 
 
