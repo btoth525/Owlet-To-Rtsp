@@ -115,11 +115,23 @@ class OwletAPI:
         """
         if not self.firebase_token:
             self._firebase()
+        # Normalize: Owlet DSNs are uppercase, and the camera DSN starts with the
+        # letter O (OCD…). A leading zero ("0CD…") is a common O/0 typo, so fix it.
+        dsn = (dsn or "").strip().upper()
+        if dsn.startswith("0CD"):
+            fixed = "O" + dsn[1:]
+            self.log(f"[kms] DSN '{dsn}' starts with a zero — Owlet cam DSNs start "
+                     f"with the letter O; using '{fixed}'")
+            dsn = fixed
         url = KMS_URL.format(dsn=dsn)
         self.log(f"[kms] GET camera key for {dsn} …")
         r = self.s.get(url, headers={"Authorization": self.firebase_token}, timeout=20)
         if r.status_code != 200:
             self.log(f"      KMS HTTP {r.status_code}: {r.text[:200]}")
+            if r.status_code == 403:
+                self.log("      → 403 = this DSN isn't a camera on your account. "
+                         "Double-check it: letter O vs zero, and no typos (it looks "
+                         "like OCD followed by digits).")
             raise OwletError(f"camera KMS failed ({r.status_code})")
         d = r.json()
         uid = d.get("tutkid") or d.get("uid")
