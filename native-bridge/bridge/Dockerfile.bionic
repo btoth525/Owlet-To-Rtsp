@@ -1,0 +1,40 @@
+# owlet-bridge (Bionic) — runs the Owlet Android/Kalay TUTK libraries under a
+# Termux (Bionic) userspace so they actually load on an x86_64 Linux box. The
+# glibc build can't (the libs are Android, linked to Bionic's `LIBC`). Same web
+# UI, same KMS auto-fetch, same tutk_client — only the runtime changes.
+
+# go2rtc is a static Go binary (no libc dependency) — grab it in a tiny stage.
+FROM debian:stable-slim AS dl
+ARG GO2RTC_VERSION=1.9.4
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fsSL -o /go2rtc \
+      "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64" \
+ && chmod +x /go2rtc
+
+FROM termux/termux-docker:x86_64
+
+# 1) Run Termux's bootstrap second stage (the entrypoint does this at container
+#    start; we need it now so the package manager works during the build).
+RUN /entrypoint.sh bash -c 'true'
+
+# 2) Install python + ffmpeg + pip deps as the Termux user (pkg/apt refuse root).
+USER 1000
+RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir requests flask'
+USER 0
+
+COPY --from=dl /go2rtc /usr/local/bin/go2rtc
+COPY owlet_api.py tutk_client.py webapp.py go2rtc.yaml start-bionic.sh /app/
+COPY templates /app/templates
+COPY static /app/static
+RUN chmod +x /app/start-bionic.sh
+
+ENV TUTK_LIB_DIR=/app/libs/x86_64 \
+    LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
+    PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin \
+    CONFIG_PATH=/config/owlet.yaml \
+    ENV_PATH=/config/owlet.env
+
+VOLUME ["/config"]
+EXPOSE 8088 1984 8554 8555
+# ENTRYPOINT stays Termux's /entrypoint.sh (runs bootstrap, then our CMD).
+CMD ["/app/start-bionic.sh"]

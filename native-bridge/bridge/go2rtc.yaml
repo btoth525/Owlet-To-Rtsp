@@ -15,6 +15,7 @@ webrtc:
 
 streams:
   owlet:
-    # Source the latest UI-saved settings, then run the TUTK client which writes
-    # raw H.264 to stdout. go2rtc supervises + restarts it.
-    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; exec python3 /app/tutk_client.py'
+    # Source the UI-saved creds, run the TUTK client (raw H.264 on stdout), and
+    # let ffmpeg repackage it into RTSP that go2rtc ingests at {output}. go2rtc
+    # supervises + restarts the whole pipeline.
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'

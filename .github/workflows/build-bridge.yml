@@ -27,10 +27,11 @@ jobs:
     strategy:
       matrix:
         include:
-          # The native Owlet/Kalay bridge (the wyze-bridge-style product).
+          # The native Owlet/Kalay bridge — Bionic (Termux) runtime so the
+          # Android TUTK libs actually load on x86_64.
           - name: owlet-bridge-native
             context: ./native-bridge/bridge
-            dockerfile: ./native-bridge/bridge/Dockerfile
+            dockerfile: ./native-bridge/bridge/Dockerfile.bionic
           # One-shot AuthKey capture appliance (mitmproxy + adb + frida).
           - name: owlet-capture
             context: ./native-bridge
