@@ -394,6 +394,11 @@ def resolve_uid() -> str:
 
 
 def main() -> None:
+    # On SIGTERM (go2rtc stopping the source / container shutdown) raise SystemExit
+    # so stream_once()'s finally releases the camera session cleanly — otherwise the
+    # cam holds the single P2P slot and the next connect is refused.
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     uid = resolve_uid()
     # Security mode to try. If pinned via env, use only that; otherwise cycle
     # [Auto, Dtls, Simple] across reconnects — each on a FRESH session so a

@@ -34,4 +34,19 @@ print("[owlet-bridge/bionic] TUTK libs load OK")
 PY
 
 python3 /app/webapp.py &
+
+# Keep the camera stream warm 24/7. The Owlet cam allows only one P2P session, and
+# go2rtc tears the on-demand source down when the last viewer leaves — so a viewer
+# (VLC/Frigate) reconnecting could fail until a manual restart. A persistent
+# internal consumer keeps exactly one camera session alive that everyone shares,
+# so connect/disconnect never touches it. Set OWLET_KEEPALIVE=0 to disable.
+if [ "${OWLET_KEEPALIVE:-1}" = "1" ]; then
+  ( sleep 8
+    while true; do
+      ffmpeg -hide_banner -loglevel error -rtsp_transport tcp \
+             -i rtsp://127.0.0.1:8554/owlet -c copy -f mpegts /dev/null 2>/dev/null
+      sleep 5
+    done ) &
+fi
+
 exec go2rtc -config /app/go2rtc.yaml
