@@ -369,29 +369,44 @@ def av_client_start(av: CDLL, session: int, mode: int) -> int:
     return av_idx
 
 
-def resolve_uid() -> str:
+def resolve_creds(refresh: bool = True) -> str:
+    """Return the camera UID, FIRST refreshing UID/AuthKey/AV-password from the
+    Owlet KMS so a *stale* saved key never blocks a (re)connect.
+
+    This is exactly the fetch the web UI's "Connect & Diagnose" performs. Doing it
+    automatically on every stream (re)start means that after a container update,
+    a power blip, or a Frigate reconnect, the camera comes back on its own — no
+    manual re-diagnose. The Owlet camera key can rotate and the cam also holds its
+    single P2P slot for ~20s after the previous container dies, so reconnecting
+    with the old key used to fail until someone re-fetched the key by hand.
+
+    If the Owlet cloud is briefly unreachable we fall back to the saved key, so a
+    transient outage doesn't kill an otherwise-working stream. Set
+    OWLET_REFRESH_KMS=0 to skip the refresh and use only the saved key.
+    """
     global AUTHKEY, AV_PASSWORD
-    if UID:
-        return UID
-    # No UID set — fetch it (+AuthKey +AV password) from the Owlet camera KMS,
-    # which needs only the account login and the camera DSN.
     dsn = os.environ.get("OWLET_CAMERA_DSN", "").strip()
-    email = os.environ.get("OWLET_EMAIL"); pw = os.environ.get("OWLET_PASSWORD")
+    email = os.environ.get("OWLET_EMAIL")
+    pw = os.environ.get("OWLET_PASSWORD")
     region = os.environ.get("OWLET_REGION", "world")
-    if dsn and email and pw:
+    if refresh and os.environ.get("OWLET_REFRESH_KMS", "1") != "0" and dsn and email and pw:
         try:
             from owlet_api import OwletAPI
             api = OwletAPI(region, email, pw, log=lambda m: log(m))
             creds = api.camera_credentials(dsn)
-            if creds.get("authkey"):
-                AUTHKEY = creds["authkey"]
-            if creds.get("av_password"):
-                AV_PASSWORD = creds["av_password"].encode()
-            log(f"resolved UID {creds['uid']} from KMS")
-            return creds["uid"]
+            if creds.get("uid"):
+                if creds.get("authkey"):
+                    AUTHKEY = creds["authkey"]
+                if creds.get("av_password"):
+                    AV_PASSWORD = creds["av_password"].encode()
+                log(f"refreshed camera key from KMS (uid={creds['uid']})")
+                return creds["uid"]
         except Exception as e:  # noqa: BLE001
-            log(f"KMS resolve failed: {e}")
-    log("No OWLET_UID set and none resolved. Set the Camera DSN + login in the UI.")
+            log(f"KMS refresh failed ({e}); falling back to the saved key")
+    if UID:
+        return UID
+    log("No OWLET_UID and KMS refresh unavailable. Set the Camera DSN + account "
+        "login in the UI.")
     sys.exit(1)
 
 
@@ -401,7 +416,8 @@ def main() -> None:
     # cam holds the single P2P slot and the next connect is refused.
     import signal
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    uid = resolve_uid()
+    uid = resolve_creds()                 # fresh key on first start
+    last_kms = time.monotonic()
     # Security mode to try. If pinned via env, use only that; otherwise cycle
     # [Auto, Dtls, Simple] across reconnects — each on a FRESH session so a
     # failed DTLS handshake on one mode can't poison the next attempt.
@@ -418,6 +434,13 @@ def main() -> None:
                     f"trying {SEC_NAMES.get(modes[i % len(modes)])} next")
             elif rc != 0:
                 log(f"exit rc={rc}; retry in 5s")
+            # On a connect/AV-login failure the saved key may be stale (rotated by
+            # Owlet, or the cam's single slot was still held) — pull a fresh one,
+            # rate-limited to once per 15s so a long camera outage doesn't hammer
+            # the Owlet cloud.
+            if rc in (4, 5) and time.monotonic() - last_kms >= 15:
+                uid = resolve_creds()
+                last_kms = time.monotonic()
         except SystemExit:
             raise
         except Exception as e:  # noqa: BLE001
