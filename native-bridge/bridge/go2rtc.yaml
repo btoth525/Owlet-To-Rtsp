@@ -18,4 +18,9 @@ streams:
     # Source the UI-saved creds, run the TUTK client (raw H.264 on stdout), and
     # let ffmpeg repackage it into RTSP that go2rtc ingests at {output}. go2rtc
     # supervises + restarts the whole pipeline.
-    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
+    #   - NO `-fflags nobuffer`: it makes ffmpeg emit the RTSP stream before it has
+    #     parsed the H.264 SPS, so consumers get a stream with no codec info and
+    #     decode nothing. Letting ffmpeg analyze the input first fixes that.
+    #   - generous analyzeduration/probesize so it reliably locks onto the first
+    #     keyframe before declaring the stream.
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
