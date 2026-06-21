@@ -27,4 +27,7 @@ streams:
     #     ffmpeg would otherwise assume a perfect 25fps; when P2P frames arrive
     #     bursty the fake PTS drifts and the stream stutters/drops. Stamping each
     #     frame with real arrival time keeps it smooth + stable.
-    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py | ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
+    #   - tutk_client's stderr ([tutk] connect/disconnect lines) -> /config/tutk.log
+    #     so camera drops are visible (`docker exec … tail -50 /config/tutk.log`);
+    #     go2rtc otherwise swallows exec stderr.
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py 2>>/config/tutk.log | ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
