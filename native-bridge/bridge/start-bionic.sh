@@ -4,8 +4,15 @@
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
 export LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib
 
-mkdir -p /config
-[ -f /config/owlet.env ] || echo "# owlet-bridge" > /config/owlet.env
+mkdir -p /config 2>/dev/null
+if [ ! -f /config/owlet.env ]; then
+  if ! (echo "# owlet-bridge" > /config/owlet.env) 2>/dev/null; then
+    echo "[owlet-bridge/bionic] WARN: /config is not writable by this container."
+    echo "[owlet-bridge/bionic]   Settings won't persist. On Unraid, run:"
+    echo "[owlet-bridge/bionic]     chmod -R 777 /mnt/user/appdata/owlet/config"
+    echo "[owlet-bridge/bionic]   then restart this container."
+  fi
+fi
 
 echo "[owlet-bridge/bionic] control panel : http://<host>:8088"
 echo "[owlet-bridge/bionic] video UI       : http://<host>:1984"
