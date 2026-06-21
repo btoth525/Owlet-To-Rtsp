@@ -49,9 +49,20 @@ def load() -> tuple[CDLL, CDLL]:
     av_p = os.path.join(LIB_DIR, "libAVAPIs.so")
     for p in (iotc_p, av_p):
         if not os.path.exists(p):
-            log(f"MISSING {p} — extract the TUTK libs from the Owlet APK (extract-libs.sh).")
+            log(f"MISSING {p} — copy the Owlet x86_64 TUTK libs into {LIB_DIR}/")
             sys.exit(2)
-    return CDLL(iotc_p), CDLL(av_p)
+    # Preload the Owlet/ThroughTek dependency libs (globally) so IOTC/AV resolve
+    # their symbols. Order: globals/tunnel/RDT first.
+    for dep in ("libTUTKGlobalAPIs.so", "libP2PTunnelAPIs.so", "libRDTAPIs.so"):
+        dp = os.path.join(LIB_DIR, dep)
+        if os.path.exists(dp):
+            try:
+                CDLL(dp, mode=ctypes.RTLD_GLOBAL)
+                log(f"preloaded {dep}")
+            except OSError as e:
+                log(f"preload {dep} failed: {e}")
+    return (CDLL(iotc_p, mode=ctypes.RTLD_GLOBAL),
+            CDLL(av_p, mode=ctypes.RTLD_GLOBAL))
 
 
 def smsg_av_stream(channel: int) -> bytes:
