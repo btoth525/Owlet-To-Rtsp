@@ -8,67 +8,121 @@
 </head>
 <body>
   <header>
-    <h1>🦉 Owlet&nbsp;→&nbsp;RTSP Bridge</h1>
-    <div id="status" class="status"></div>
+    <div class="head-row">
+      <h1>🦉 Owlet&nbsp;→&nbsp;RTSP Bridge</h1>
+      <div class="pills" id="pills">
+        <span class="pill" id="pill-libs"><span class="dot"></span>Libraries</span>
+        <span class="pill" id="pill-login"><span class="dot"></span>Account</span>
+        <span class="pill" id="pill-uid"><span class="dot"></span>Camera key</span>
+        <span class="pill" id="pill-stream"><span class="dot"></span>Stream</span>
+      </div>
+    </div>
   </header>
 
   <main>
+    <!-- ============ STREAM ============ -->
     <section class="card">
-      <h2>1 · Owlet account</h2>
-      <div class="grid">
-        <label>Region
-          <select id="region">
-            <option value="world">world</option>
-            <option value="europe">europe</option>
-          </select>
-        </label>
-        <label>Email <input id="email" type="email" autocomplete="username"></label>
-        <label>Password <input id="password" type="password" autocomplete="current-password"></label>
-      </div>
-      <div class="row">
-        <button id="btn-diagnose" class="primary">Connect &amp; Diagnose</button>
-        <button id="btn-save">Save settings</button>
-        <span class="hint">Diagnose runs the real login and dumps everything to the log →</span>
+      <h2>📺 Your stream</h2>
+      <div class="hero">
+        <div class="preview" id="preview">
+          <img id="preview-img" alt="camera preview">
+          <div class="ph" id="preview-ph">No video yet</div>
+        </div>
+        <div>
+          <span class="live-badge" id="live-badge"><span class="dot"></span><span id="live-text">offline</span></span>
+          <div class="urls">
+            <div class="url-row"><span class="lbl">RTSP</span><code id="u-rtsp">—</code>
+              <button class="mini" data-copy="u-rtsp">copy</button></div>
+            <div class="url-row"><span class="lbl">WebRTC</span><code id="u-web">—</code>
+              <button class="mini" data-copy="u-web">copy</button></div>
+            <div class="url-row"><span class="lbl">HLS</span><code id="u-hls">—</code>
+              <button class="mini" data-copy="u-hls">copy</button></div>
+          </div>
+          <div class="row">
+            <a class="btn" id="go2rtc-link" href="#" target="_blank">Open video UI ↗</a>
+            <button id="btn-restart">↻ Restart stream</button>
+          </div>
+          <div id="stream-banner"></div>
+        </div>
       </div>
     </section>
 
-    <section class="card">
-      <h2>2 · Camera / TUTK settings</h2>
-      <p class="hint">Auto-filled from the diagnostic when found; otherwise paste them in.</p>
+    <!-- ============ STEP 1 — ACCOUNT ============ -->
+    <section class="card" id="card-account">
+      <h2><span class="step">1</span> Owlet account</h2>
       <div class="grid">
-        <label>Camera DSN <input id="camera_dsn" placeholder="OCD… (starts with letter O) — auto-fetches the rest"></label>
-        <label>Camera UID <input id="uid" placeholder="auto-filled from KMS (tutkid)"></label>
-        <label>AuthKey <input id="authkey" placeholder="auto-filled from KMS"></label>
+        <label>Region
+          <select id="region"><option value="world">world</option><option value="europe">europe</option></select>
+        </label>
+        <label>Email <input id="email" type="email" autocomplete="username"></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+        <label>Camera DSN <input id="camera_dsn" placeholder="OCD… (starts with letter O)"></label>
+      </div>
+      <div class="row">
+        <button id="btn-diagnose" class="primary"><span class="spin"></span>Connect &amp; Diagnose</button>
+        <button id="btn-save">Save settings</button>
+        <span class="hint">Logs in, fetches your camera key, and fills everything below.</span>
+      </div>
+    </section>
+
+    <!-- ============ STEP 2 — CAMERA ============ -->
+    <section class="card" id="card-camera">
+      <h2><span class="step">2</span> Camera &amp; stream settings</h2>
+      <p class="hint">Auto-filled by the diagnostic. You normally don't touch these.</p>
+      <div class="grid">
+        <label>Camera UID <input id="uid" placeholder="auto-filled (tutkid)"></label>
+        <label>AuthKey <input id="authkey" placeholder="auto-filled"></label>
         <label>AV account <input id="av_account" value="admin"></label>
         <label>AV password <input id="av_password" type="password"></label>
-        <label>Start IOCTL <input id="iotype_start" value="0x01FF"></label>
         <label>AV channel <input id="av_channel" value="0"></label>
-        <label>TUTK license key <input id="license_key" placeholder="from the app (required for newer cams)"></label>
-        <label>Region code <input id="region_code" placeholder="e.g. 0/1/2/3"></label>
+        <label>Start IOCTL <input id="iotype_start" value="511"></label>
+        <label>License key <input id="license_key" placeholder="baked in — leave as is"></label>
+        <label>Region code <input id="region_code" value="3"></label>
       </div>
       <div class="row">
-        <input id="cam_ip" placeholder="camera IP (optional, e.g. 192.168.1.50)" style="flex:1;min-width:200px">
-        <button id="btn-discover">🔍 Find camera on my network</button>
-      </div>
-      <div class="row">
-        <button id="btn-save2">Save &amp; (re)start stream</button>
-        <a class="btn" id="go2rtc-link" href="#" target="_blank">Open video UI (go2rtc) ↗</a>
+        <button id="btn-save2" class="primary"><span class="spin"></span>Save &amp; (re)start stream</button>
         <span class="hint" id="rtsp-hint"></span>
       </div>
     </section>
 
-    <section class="card">
-      <h2>3 · Findings</h2>
-      <div id="findings" class="findings">Run a diagnostic to populate candidates.</div>
+    <!-- ============ LIBRARIES ============ -->
+    <section class="card" id="card-libs">
+      <h2>🧩 TUTK libraries</h2>
+      <div id="libs-banner"></div>
+      <p class="hint" style="margin:12px 0 6px">Upload the Owlet app you downloaded — the bridge pulls the
+        libraries out itself. Nothing proprietary is bundled; you supply your own copy.</p>
+      <div class="row">
+        <input type="file" id="apk-file" accept=".apk,.apkm,.xapk,.zip" style="flex:1;min-width:200px">
+        <button id="btn-upload" class="primary"><span class="spin"></span>⬆ Upload &amp; extract</button>
+      </div>
+      <div class="prog" id="up-prog"><div class="bar" id="up-bar"></div></div>
+      <div class="row">
+        <span class="spacer"></span>
+        <span class="hint">Already copied it into the config folder?</span>
+        <button id="btn-extract" class="mini"><span class="spin"></span>Extract from folder</button>
+      </div>
     </section>
 
+    <!-- ============ LOG ============ -->
     <section class="card">
-      <h2>Live log <button id="btn-clear" class="mini">clear</button>
-        <button id="btn-copy" class="mini">copy</button></h2>
+      <h2>📜 Live log
+        <span class="spacer"></span>
+        <button id="btn-clear" class="mini">clear</button>
+        <button id="btn-copy" class="mini">copy</button>
+      </h2>
       <pre id="log" class="log"></pre>
+      <details style="margin-top:10px">
+        <summary>Advanced: findings &amp; LAN discovery</summary>
+        <div class="row">
+          <input id="cam_ip" placeholder="camera IP (optional)" style="flex:1;min-width:180px">
+          <button id="btn-discover">🔍 Find camera on LAN</button>
+        </div>
+        <div id="findings" class="findings" style="margin-top:10px">Run a diagnostic to populate candidates.</div>
+      </details>
     </section>
   </main>
 
+  <div class="toast-wrap" id="toasts"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

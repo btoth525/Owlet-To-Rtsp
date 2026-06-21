@@ -26,6 +26,8 @@ import requests
 from flask import Flask, Response, jsonify, render_template, request
 
 app = Flask(__name__)
+# Owlet APK bundles (.apkm) are large; allow up to 1 GB uploads.
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 
 # Quiet the per-request access log so go2rtc / TUTK output is visible in
 # `docker logs` (the status/findings polling was drowning everything out).
@@ -35,6 +37,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/owlet.yaml")
 ENV_PATH = os.environ.get("ENV_PATH", "/config/owlet.env")
 GO2RTC_API = os.environ.get("GO2RTC_API", "http://127.0.0.1:1984")
+TUTK_LIB_DIR = os.environ.get("TUTK_LIB_DIR", "/app/libs/x86_64")
 
 # The TUTK license key + US region (3) are baked into the Owlet Android app and
 # recovered by decompiling it; pre-fill them so the camera connects out of the box.
@@ -327,11 +330,20 @@ def findings():
 # --------------------------------------------------------------------------- #
 # stream status / control
 # --------------------------------------------------------------------------- #
+def _have_libs() -> bool:
+    try:
+        from lib_extract import have_all
+        return have_all(TUTK_LIB_DIR)
+    except Exception:  # noqa: BLE001
+        return os.path.exists(os.path.join(TUTK_LIB_DIR, "libIOTCAPIs.so"))
+
+
 @app.get("/api/status")
 def status():
     cfg = load_config()
     have_login = bool(cfg.get("email") and cfg.get("password"))
     have_uid = bool(cfg.get("uid"))
+    have_libs = _have_libs()
     stream_up = False
     try:
         r = requests.get(f"{GO2RTC_API}/api/streams", timeout=4)
@@ -342,10 +354,44 @@ def status():
     except Exception:  # noqa: BLE001
         pass
     return jsonify({
-        "have_login": have_login, "have_uid": have_uid,
+        "have_login": have_login, "have_uid": have_uid, "have_libs": have_libs,
         "stream_up": stream_up, "busy": STATE["busy"],
-        "go2rtc_ui": "/go2rtc/", "rtsp_hint": "rtsp://<host>:8554/owlet",
+        "config_writable": os.access(os.path.dirname(CONFIG_PATH), os.W_OK),
     })
+
+
+@app.post("/api/extract_libs")
+def extract_libs_ep():
+    from lib_extract import provision
+    search = [os.environ.get("OWLET_APK_DIR"), os.path.dirname(CONFIG_PATH),
+              "/config", "/app/libs", "/apk"]
+    ok, msg = provision(TUTK_LIB_DIR, search, log=log)
+    log(f"[libs] {msg}")
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.post("/api/upload_apk")
+def upload_apk():
+    """Accept an uploaded Owlet .apk/.apkm/.xapk and extract the TUTK libs from it."""
+    from werkzeug.utils import secure_filename
+    from lib_extract import provision
+    f = request.files.get("apk")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "message": "no file received"}), 400
+    name = secure_filename(f.filename) or "owlet-upload.apkm"
+    dest_dir = os.path.dirname(CONFIG_PATH)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, name)
+        f.save(dest)
+    except OSError as e:  # noqa: BLE001
+        log(f"[upload] cannot save: {e}")
+        return jsonify({"ok": False,
+                        "message": f"cannot save upload ({e.strerror}) — is /config writable?"}), 500
+    log(f"[upload] received {name} ({os.path.getsize(dest)//1024} KB); extracting libraries…")
+    ok, msg = provision(TUTK_LIB_DIR, [dest_dir, "/config", "/app/libs"], log=log)
+    log(f"[libs] {msg}")
+    return jsonify({"ok": ok, "message": msg})
 
 
 @app.post("/api/stream/restart")

@@ -44,23 +44,25 @@ step to a live log.
 
 ## Quick start (Unraid)
 
-### 1 · Extract the TUTK libraries (one time)
+### 1 · Provide the TUTK libraries (one time)
 
 The proprietary ThroughTek `.so` libraries are **not** shipped — each user pulls
-them from the Owlet APK they installed. The container is x86‑64, so it needs the
-x86‑64 libraries. Put `owlet.apk` (or the base APK from an `.apkm`/`.xapk`) on the
-server and extract the five libraries into a host folder:
+them from the Owlet app they downloaded. You don't have to do this by hand:
+
+**Easiest — upload in the web UI.** Start the container (step 2), open the control
+panel, and in the **🧩 TUTK libraries** card click **Upload & extract** and pick
+your Owlet `.apkm` (or `.apk`). The bridge pulls the five x86‑64 libraries out of
+it for you. (It also auto‑extracts any APK it finds in the mounted config folder
+on startup.)
+
+**Or by hand**, extract them into the libs folder:
 
 ```bash
 mkdir -p /mnt/user/appdata/owlet/libs/x86_64 /mnt/user/appdata/owlet/config
-cd /mnt/user/appdata/owlet
-unzip -o -j owlet.apk \
-  'lib/x86_64/libIOTCAPIs.so' \
-  'lib/x86_64/libAVAPIs.so' \
-  'lib/x86_64/libTUTKGlobalAPIs.so' \
-  'lib/x86_64/libP2PTunnelAPIs.so' \
-  'lib/x86_64/libRDTAPIs.so' \
-  -d libs/x86_64
+unzip -o -j /path/to/split_config.x86_64.apk \
+  'lib/x86_64/libIOTCAPIs.so' 'lib/x86_64/libAVAPIs.so' \
+  'lib/x86_64/libTUTKGlobalAPIs.so' 'lib/x86_64/libP2PTunnelAPIs.so' \
+  'lib/x86_64/libRDTAPIs.so' -d /mnt/user/appdata/owlet/libs/x86_64
 ```
 
 > These libraries are Android binaries linked against Bionic libc. The container

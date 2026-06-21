@@ -18,6 +18,10 @@ echo "[owlet-bridge/bionic] control panel : http://<host>:8088"
 echo "[owlet-bridge/bionic] video UI       : http://<host>:1984"
 echo "[owlet-bridge/bionic] RTSP           : rtsp://<host>:8554/owlet"
 
+# Auto-provision the proprietary TUTK libs from a dropped Owlet APK (.apk/.apkm)
+# if they're not already in the mounted libs folder. No-op once they're present.
+python3 -c 'import sys; sys.path.insert(0,"/app"); from lib_extract import provision; ok,m=provision("/app/libs/x86_64",["/config","/app/libs","/apk"]); print("[owlet-bridge/bionic] libs:",m)' 2>&1
+
 # sanity: confirm the TUTK libs load at startup (logs to container output)
 python3 - <<'PY' 2>&1 || echo "[owlet-bridge/bionic] WARN: TUTK libs not loadable yet (mount /app/libs)"
 import ctypes, os

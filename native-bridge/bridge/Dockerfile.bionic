@@ -23,7 +23,7 @@ RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir r
 USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
-COPY owlet_api.py tutk_client.py webapp.py go2rtc.yaml start-bionic.sh /app/
+COPY owlet_api.py tutk_client.py webapp.py lib_extract.py go2rtc.yaml start-bionic.sh /app/
 COPY templates /app/templates
 COPY static /app/static
 RUN chmod +x /app/start-bionic.sh
