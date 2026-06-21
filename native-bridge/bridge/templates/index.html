@@ -13,8 +13,8 @@
       <div class="pills" id="pills">
         <span class="pill" id="pill-libs"><span class="dot"></span>Libraries</span>
         <span class="pill" id="pill-login"><span class="dot"></span>Account</span>
-        <span class="pill" id="pill-uid"><span class="dot"></span>Camera key</span>
-        <span class="pill" id="pill-stream"><span class="dot"></span>Stream</span>
+        <span class="pill" id="pill-cams"><span class="dot"></span>Cameras</span>
+        <span class="pill" id="pill-live"><span class="dot"></span>Live</span>
       </div>
     </div>
   </header>
@@ -23,73 +23,61 @@
     <!-- ============ SETUP CHECKLIST ============ -->
     <section class="card setup" id="setup">
       <h2 id="setup-title">🚀 Get your camera streaming</h2>
-      <p class="hint" id="setup-sub">Three quick steps — this panel tracks your progress and tucks away when you're done.</p>
+      <p class="hint" id="setup-sub">A few quick steps — this panel tracks your progress and tucks away when you're done.</p>
       <ol class="checklist" id="checklist">
         <li data-step="libs"><span class="ck"></span><div><b>Provide the TUTK libraries</b>
           <span class="do">Upload your Owlet APK in the Libraries card below.</span></div></li>
         <li data-step="login"><span class="ck"></span><div><b>Sign in to Owlet</b>
-          <span class="do">Enter your email, password &amp; Camera DSN in step 1.</span></div></li>
-        <li data-step="uid"><span class="ck"></span><div><b>Fetch your camera key</b>
-          <span class="do">Click <b>Connect &amp; Diagnose</b> — it auto-fills the rest.</span></div></li>
-        <li data-step="stream"><span class="ck"></span><div><b>Start streaming</b>
-          <span class="do">Click <b>Save &amp; (re)start stream</b>.</span></div></li>
+          <span class="do">Enter your email &amp; password in the Account card.</span></div></li>
+        <li data-step="uid"><span class="ck"></span><div><b>Add a camera</b>
+          <span class="do">Enter the camera's DSN and click <b>Add &amp; connect</b> — it fetches the camera key automatically.</span></div></li>
+        <li data-step="stream"><span class="ck"></span><div><b>Streaming</b>
+          <span class="do">Your camera goes live — point Frigate at its RTSP URL.</span></div></li>
       </ol>
     </section>
 
-    <!-- ============ STREAM ============ -->
-    <section class="card">
-      <h2>📺 Your stream <span class="spacer"></span><span class="stats" id="stream-stats"></span></h2>
-      <span class="live-badge" id="live-badge"><span class="dot"></span><span id="live-text">offline</span></span>
-      <div class="urls">
-        <div class="url-row"><span class="lbl">RTSP</span><code id="u-rtsp">—</code>
-          <button class="mini" data-copy="u-rtsp">copy</button></div>
-        <div class="url-row"><span class="lbl">WebRTC</span><code id="u-web">—</code>
-          <button class="mini" data-copy="u-web">copy</button></div>
-        <div class="url-row"><span class="lbl">HLS</span><code id="u-hls">—</code>
-          <button class="mini" data-copy="u-hls">copy</button></div>
-      </div>
-      <div class="row">
-        <button class="btn" id="go2rtc-link">Open video UI ↗</button>
-        <button id="btn-restart">↻ Restart stream</button>
-      </div>
-      <div id="stream-banner"></div>
-    </section>
-
-    <!-- ============ STEP 1 — ACCOUNT ============ -->
+    <!-- ============ ACCOUNT ============ -->
     <section class="card" id="card-account">
       <h2><span class="step">1</span> Owlet account</h2>
+      <p class="hint">Your login is shared by every camera. Enter it once.</p>
       <div class="grid">
         <label>Region
           <select id="region"><option value="world">world</option><option value="europe">europe</option></select>
         </label>
         <label>Email <input id="email" type="email" autocomplete="username"></label>
         <label>Password <input id="password" type="password" autocomplete="current-password"></label>
-        <label>Camera DSN <input id="camera_dsn" placeholder="OCD… (starts with letter O)"></label>
       </div>
       <div class="row">
-        <button id="btn-diagnose" class="primary"><span class="spin"></span>Connect &amp; Diagnose</button>
-        <button id="btn-save">Save settings</button>
-        <span class="hint">Logs in, fetches your camera key, and fills everything below.</span>
+        <button id="btn-save-account" class="primary"><span class="spin"></span>Save account</button>
+        <button id="btn-testlogin">Test login</button>
+        <span class="hint">Test login confirms your credentials and lists account devices in the log.</span>
       </div>
+      <details style="margin-top:12px">
+        <summary>Advanced account / AV defaults</summary>
+        <div class="grid" style="margin-top:10px">
+          <label>AV account <input id="av_account" value="admin"></label>
+          <label>Start IOCTL <input id="iotype_start" value="511"></label>
+          <label>AV channel <input id="av_channel" value="0"></label>
+          <label>Region code <input id="region_code" value="3"></label>
+          <label style="grid-column:1/-1">License key <input id="license_key" placeholder="baked in — leave as is"></label>
+        </div>
+      </details>
     </section>
 
-    <!-- ============ STEP 2 — CAMERA ============ -->
-    <section class="card" id="card-camera">
-      <h2><span class="step">2</span> Camera &amp; stream settings</h2>
-      <p class="hint">Auto-filled by the diagnostic. You normally don't touch these.</p>
-      <div class="grid">
-        <label>Camera UID <input id="uid" placeholder="auto-filled (tutkid)"></label>
-        <label>AuthKey <input id="authkey" placeholder="auto-filled"></label>
-        <label>AV account <input id="av_account" value="admin"></label>
-        <label>AV password <input id="av_password" type="password"></label>
-        <label>AV channel <input id="av_channel" value="0"></label>
-        <label>Start IOCTL <input id="iotype_start" value="511"></label>
-        <label>License key <input id="license_key" placeholder="baked in — leave as is"></label>
-        <label>Region code <input id="region_code" value="3"></label>
+    <!-- ============ CAMERAS ============ -->
+    <section class="card" id="card-cameras">
+      <h2><span class="step">2</span> Cameras <span class="spacer"></span>
+        <span class="chip" id="cam-count"></span></h2>
+      <p class="hint">Add each camera by its DSN (looks like <b>OCD…</b> — a capital letter&nbsp;O, not a zero).
+        Each camera gets its own RTSP stream. The Owlet cam isn't listed on your account, so they're added by DSN.</p>
+      <div class="row add-cam">
+        <input id="new-name" placeholder="name (e.g. nursery) — optional" style="flex:1;min-width:150px">
+        <input id="new-dsn" placeholder="Camera DSN (OCD…)" style="flex:1;min-width:170px">
+        <button id="btn-add-cam" class="primary"><span class="spin"></span>＋ Add &amp; connect</button>
       </div>
-      <div class="row">
-        <button id="btn-save2" class="primary"><span class="spin"></span>Save &amp; (re)start stream</button>
-        <span class="hint" id="rtsp-hint"></span>
+      <div id="camera-list"></div>
+      <div id="cameras-empty" class="banner" style="margin-top:14px">
+        <span class="ico">📹</span><div>No cameras yet. Add one above to start streaming.</div>
       </div>
     </section>
 
@@ -120,12 +108,12 @@
       </h2>
       <pre id="log" class="log"></pre>
       <details style="margin-top:10px">
-        <summary>Advanced: findings &amp; LAN discovery</summary>
+        <summary>Advanced: LAN discovery</summary>
         <div class="row">
           <input id="cam_ip" placeholder="camera IP (optional)" style="flex:1;min-width:180px">
           <button id="btn-discover">🔍 Find camera on LAN</button>
         </div>
-        <div id="findings" class="findings" style="margin-top:10px">Run a diagnostic to populate candidates.</div>
+        <div id="findings" class="findings" style="margin-top:10px">Run a login test to populate candidates.</div>
       </details>
     </section>
   </main>

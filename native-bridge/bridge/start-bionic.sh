@@ -16,7 +16,7 @@ fi
 
 echo "[owlet-bridge/bionic] control panel : http://<host>:8088"
 echo "[owlet-bridge/bionic] video UI       : http://<host>:1984"
-echo "[owlet-bridge/bionic] RTSP           : rtsp://<host>:8554/owlet"
+echo "[owlet-bridge/bionic] RTSP           : rtsp://<host>:8554/<camera>"
 
 # Auto-provision the proprietary TUTK libs from a dropped Owlet APK (.apk/.apkm)
 # if they're not already in the mounted libs folder. No-op once they're present.
@@ -33,20 +33,22 @@ for n in ("libTUTKGlobalAPIs.so","libP2PTunnelAPIs.so","libRDTAPIs.so","libIOTCA
 print("[owlet-bridge/bionic] TUTK libs load OK")
 PY
 
+# Generate the go2rtc config (one stream per saved camera) + per-camera env files.
+# Falls back to the baked-in single-camera /app/go2rtc.yaml if /config isn't
+# writable (so a permission problem degrades gracefully to the old behaviour).
+GO2RTC_CFG=/app/go2rtc.yaml
+if python3 /app/render_streams.py; then
+  [ -f /config/go2rtc.gen.yaml ] && GO2RTC_CFG=/config/go2rtc.gen.yaml
+fi
+echo "[owlet-bridge/bionic] go2rtc config : $GO2RTC_CFG"
+
 python3 /app/webapp.py &
 
-# Keep the camera stream warm 24/7. The Owlet cam allows only one P2P session, and
-# go2rtc tears the on-demand source down when the last viewer leaves — so a viewer
-# (VLC/Frigate) reconnecting could fail until a manual restart. A persistent
-# internal consumer keeps exactly one camera session alive that everyone shares,
-# so connect/disconnect never touches it. Set OWLET_KEEPALIVE=0 to disable.
+# Keep every camera's stream warm 24/7 (one persistent internal viewer each). The
+# supervisor re-reads the camera list, so cameras added/removed in the UI are
+# picked up without a restart. Set OWLET_KEEPALIVE=0 to disable.
 if [ "${OWLET_KEEPALIVE:-1}" = "1" ]; then
-  ( sleep 8
-    while true; do
-      ffmpeg -hide_banner -loglevel error -rtsp_transport tcp \
-             -i rtsp://127.0.0.1:8554/owlet -c copy -f mpegts /dev/null 2>/dev/null
-      sleep 5
-    done ) &
+  python3 /app/keepalive.py &
 fi
 
-exec go2rtc -config /app/go2rtc.yaml
+exec go2rtc -config "$GO2RTC_CFG"

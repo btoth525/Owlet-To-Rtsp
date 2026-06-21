@@ -124,6 +124,22 @@ input[type=file]{padding:7px;font-size:13px}
 input[type=file]::file-selector-button{background:#222a34;color:var(--fg);border:1px solid var(--line);
   border-radius:6px;padding:5px 10px;margin-right:10px;cursor:pointer}
 
+/* ---- cameras ---- */
+.add-cam{margin-top:6px}
+.cam{border-color:var(--line)}
+.cam-head{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.cam-head h2{margin:0}
+.cam-title{font-family:ui-monospace,Menlo,Consolas,monospace}
+#camera-list{display:flex;flex-direction:column;gap:0}
+#camera-list .cam{margin-top:14px;margin-bottom:0;background:#141a21}
+.cam .urls{margin-top:0}
+.cam-banner:empty{display:none}
+.cam-adv{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.cam-adv.hidden{display:none}
+button.danger{color:var(--bad)}
+button.danger:hover{border-color:var(--bad)}
+#cameras-empty{display:flex}
+
 /* ---- toasts ---- */
 .toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:#1c232c;border:1px solid var(--line);border-left:3px solid var(--accent);
