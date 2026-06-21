@@ -27,10 +27,13 @@ async function saveAndRestart() {
 }
 
 async function diagnose() {
-  const body = {region:$("region").value, email:$("email").value, password:$("password").value};
+  const body = {region:$("region").value, email:$("email").value, password:$("password").value, camera_dsn:$("camera_dsn").value};
   $("btn-diagnose").disabled = true;
   await fetch("/api/diagnose", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
-  setTimeout(() => { $("btn-diagnose").disabled = false; refreshFindings(); }, 1500);
+  // reload the form a few times so the KMS-fetched UID/AuthKey/password appear
+  setTimeout(() => { $("btn-diagnose").disabled = false; refreshFindings(); loadConfig(); }, 1500);
+  setTimeout(loadConfig, 4000);
+  setTimeout(loadConfig, 8000);
   pollFindings();
 }
 

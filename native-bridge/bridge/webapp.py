@@ -28,6 +28,11 @@ from flask import Flask, Response, jsonify, render_template, request
 
 app = Flask(__name__)
 
+# Quiet the per-request access log so go2rtc / TUTK output is visible in
+# `docker logs` (the status/findings polling was drowning everything out).
+import logging  # noqa: E402
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/owlet.yaml")
 ENV_PATH = os.environ.get("ENV_PATH", "/config/owlet.env")
 GO2RTC_API = os.environ.get("GO2RTC_API", "http://127.0.0.1:1984")
@@ -95,8 +100,16 @@ def post_config():
     incoming = request.json or {}
     cfg = load_config()
     for k in DEFAULTS:
-        if k in incoming and not (k == "password" and incoming[k] == "********"):
-            cfg[k] = incoming[k]
+        if k not in incoming:
+            continue
+        val = incoming[k]
+        if k == "password" and val == "********":
+            continue
+        # Never wipe a saved non-empty value with an empty form field — this is
+        # how the KMS-fetched UID/AuthKey used to get clobbered.
+        if (val is None or val == "") and (cfg.get(k) or "") != "":
+            continue
+        cfg[k] = val
     save_config(cfg)
     log("settings saved.")
     return jsonify({"ok": True})
@@ -149,12 +162,15 @@ def diagnose():
     cfg = load_config()
     # allow creds passed straight from the form (before saving)
     incoming = request.json or {}
-    for k in ("region", "email", "password"):
+    for k in ("region", "email", "password", "camera_dsn"):
         if incoming.get(k) and incoming[k] != "********":
             cfg[k] = incoming[k]
+    # Persist login + DSN now so they survive even before the KMS fetch — the
+    # stream can resolve the camera key from these alone.
+    save_config(cfg)
     LOG.clear()
     log("=== Owlet login diagnostic ===")
-    log("build: firebase-android-cert-auth (if you don't see this line, you're on the OLD image)")
+    log("build: kms-autofetch")
     threading.Thread(target=_diagnose_worker, args=(cfg,), daemon=True).start()
     return jsonify({"ok": True})
 
