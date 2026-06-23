@@ -18,12 +18,15 @@ echo "[owlet-bridge/bionic] control panel : http://<host>:8088"
 echo "[owlet-bridge/bionic] video UI       : http://<host>:1984"
 echo "[owlet-bridge/bionic] RTSP           : rtsp://<host>:8554/<camera>"
 
-# Cap the TUTK log so it can't slowly fill appdata. tutk_client appends to it via
-# go2rtc's exec; keep the tail and start fresh if it's grown past ~20 MB.
-if [ -f /config/tutk.log ] && [ "$(stat -c%s /config/tutk.log 2>/dev/null || echo 0)" -gt 20971520 ]; then
-  tail -c 2097152 /config/tutk.log > /config/tutk.log.tmp 2>/dev/null && mv /config/tutk.log.tmp /config/tutk.log 2>/dev/null
-  echo "[owlet-bridge/bionic] trimmed oversized /config/tutk.log"
-fi
+# Cap the per-camera TUTK logs so they can't slowly fill appdata. tutk_client
+# appends to them via go2rtc's exec; keep the tail of any that grew past ~20 MB.
+for lf in /config/tutk.log /config/tutk-*.log; do
+  [ -f "$lf" ] || continue
+  if [ "$(stat -c%s "$lf" 2>/dev/null || echo 0)" -gt 20971520 ]; then
+    tail -c 2097152 "$lf" > "$lf.tmp" 2>/dev/null && mv "$lf.tmp" "$lf" 2>/dev/null
+    echo "[owlet-bridge/bionic] trimmed oversized $lf"
+  fi
+done
 
 # Auto-provision the proprietary TUTK libs from a dropped Owlet APK (.apk/.apkm)
 # if they're not already in the mounted libs folder. No-op once they're present.
