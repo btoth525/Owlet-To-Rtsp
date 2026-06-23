@@ -70,6 +70,12 @@ AV_CHANNEL = int(os.environ.get("OWLET_AV_CHANNEL") or "0")
 LICENSE_KEY = os.environ.get("OWLET_LICENSE_KEY") or APP_LICENSE_KEY
 REGION_CODE = int(os.environ.get("OWLET_REGION_CODE") or "3")          # 3 = REGION_US
 CONNECT_TIMEOUT = int(os.environ.get("OWLET_CONNECT_TIMEOUT") or "20")
+# A connect can succeed at the IOTC/AV layer yet deliver NO video when the camera's
+# single P2P slot is still held by a prior/racing session. Give up on such a "dud"
+# session after this many seconds with no frame, then wait out the camera's session
+# hold before reconnecting (otherwise the next connect just races it again).
+NO_VIDEO_TIMEOUT = int(os.environ.get("OWLET_NO_VIDEO_TIMEOUT") or "15")
+RECONNECT_WAIT = int(os.environ.get("OWLET_RECONNECT_WAIT") or "25")  # > cam's 20s session hold
 # AV layer (avClientStartEx, the path the Owlet app uses). security_mode:
 # 0=Simple 1=Dtls 2=Auto; auth_type: 0=Password 1=Token 2=Nebula. If
 # OWLET_AV_SECURITY_MODE is blank we auto-probe [Auto, Dtls, Simple] because the
@@ -301,6 +307,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
         out = sys.stdout.buffer
         frames = 0
         last_log = time.time()
+        last_data = time.time()
         while True:
             rc = av.avRecvFrameData2(av_idx, buf, FRAME_BUF,
                                      byref(actual), byref(expected),
@@ -310,13 +317,25 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 # 2 MB .raw copy of the whole buffer every frame (matters at 25fps).
                 out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
+                last_data = time.time()
                 if time.time() - last_log > 15:
                     log(f"{frames} frames forwarded"); last_log = time.time()
             elif rc == AV_ER_DATA_NOREADY:
+                # No frame yet. If it's been silent too long this session is a dud
+                # (or has silently stalled) — bail so main() waits out the camera's
+                # session hold and reconnects, instead of hanging here forever (which
+                # used to require a manual "Connect & Diagnose" in the UI).
+                if time.time() - last_data > NO_VIDEO_TIMEOUT:
+                    log(f"no video for {NO_VIDEO_TIMEOUT}s (frames={frames}) — dud/"
+                        "stalled session; reconnecting after the camera releases it")
+                    return 6
                 time.sleep(0.01)
             elif rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
                 log(f"stream ended rc={rc}"); break
             else:
+                if time.time() - last_data > NO_VIDEO_TIMEOUT:
+                    log(f"no video for {NO_VIDEO_TIMEOUT}s — session stalled; reconnecting")
+                    return 6
                 time.sleep(0.02)
         return 0
     finally:
@@ -426,6 +445,7 @@ def main() -> None:
     i = 0
     while True:
         mode = modes[i % len(modes)]
+        backoff = 5
         try:
             rc = stream_once(uid, mode)
             if rc == 5:
@@ -433,13 +453,20 @@ def main() -> None:
                 i += 1
                 log(f"AV login failed (security={SEC_NAMES.get(mode, mode)}); "
                     f"trying {SEC_NAMES.get(modes[i % len(modes)])} next")
+            elif rc == 6:
+                # Connected but got no video — the camera's single session was still
+                # held. Wait past its ~20s session-alive-timeout so it fully releases;
+                # reconnecting sooner just races it and gets another empty session.
+                backoff = RECONNECT_WAIT
+                log(f"no-video session — waiting {RECONNECT_WAIT}s for the camera to "
+                    "release its session before reconnecting")
             elif rc != 0:
                 log(f"exit rc={rc}; retry in 5s")
-            # On a connect/AV-login failure the saved key may be stale (rotated by
-            # Owlet, or the cam's single slot was still held) — pull a fresh one,
-            # rate-limited to once per 15s so a long camera outage doesn't hammer
-            # the Owlet cloud.
-            if rc in (4, 5) and time.monotonic() - last_kms >= 15:
+            # On a connect/AV-login/no-video failure the saved key may be stale
+            # (rotated by Owlet, or the cam's single slot was still held) — pull a
+            # fresh one, rate-limited to once per 15s so a long camera outage doesn't
+            # hammer the Owlet cloud.
+            if rc in (4, 5, 6) and time.monotonic() - last_kms >= 15:
                 uid = resolve_creds()
                 last_kms = time.monotonic()
         except SystemExit:
@@ -459,7 +486,7 @@ def main() -> None:
             return
         except Exception as e:  # noqa: BLE001
             log(f"error: {e}; retry in 5s")
-        time.sleep(5)
+        time.sleep(backoff)
 
 
 if __name__ == "__main__":
