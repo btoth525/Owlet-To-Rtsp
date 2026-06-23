@@ -158,7 +158,8 @@ class St_AVClientStartOutConfig(Structure):
 
 
 def log(*a):
-    print("[tutk]", *a, file=sys.stderr, flush=True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(ts, "[tutk]", *a, file=sys.stderr, flush=True)
 
 
 def _set_sig(lib, name, restype, argtypes):
@@ -309,7 +310,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 # 2 MB .raw copy of the whole buffer every frame (matters at 25fps).
                 out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
-                if time.time() - last_log > 10:
+                if time.time() - last_log > 60:
                     log(f"{frames} frames forwarded"); last_log = time.time()
             elif rc == AV_ER_DATA_NOREADY:
                 time.sleep(0.01)
@@ -443,6 +444,17 @@ def main() -> None:
                 last_kms = time.monotonic()
         except SystemExit:
             raise
+        except BrokenPipeError:
+            # Our stdout consumer (ffmpeg) died — e.g. go2rtc recycled the stream.
+            # Do NOT sit here reconnecting to the camera and writing into a dead
+            # pipe: that keeps the `tutk_client | ffmpeg` exec "alive" so go2rtc
+            # never restarts it, while we burn the camera's single P2P slot and
+            # Frigate gets nothing (this caused multi-hour stalls). Exit instead,
+            # so go2rtc relaunches the whole pipeline with a fresh ffmpeg —
+            # recovery in ~1s.
+            log("downstream ffmpeg closed the pipe — exiting for a clean go2rtc "
+                "restart of the pipeline")
+            return
         except Exception as e:  # noqa: BLE001
             log(f"error: {e}; retry in 5s")
         time.sleep(5)
