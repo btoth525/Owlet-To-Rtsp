@@ -310,7 +310,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 # 2 MB .raw copy of the whole buffer every frame (matters at 25fps).
                 out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
-                if time.time() - last_log > 60:
+                if time.time() - last_log > 15:
                     log(f"{frames} frames forwarded"); last_log = time.time()
             elif rc == AV_ER_DATA_NOREADY:
                 time.sleep(0.01)
@@ -446,14 +446,16 @@ def main() -> None:
             raise
         except BrokenPipeError:
             # Our stdout consumer (ffmpeg) died — e.g. go2rtc recycled the stream.
-            # Do NOT sit here reconnecting to the camera and writing into a dead
-            # pipe: that keeps the `tutk_client | ffmpeg` exec "alive" so go2rtc
-            # never restarts it, while we burn the camera's single P2P slot and
-            # Frigate gets nothing (this caused multi-hour stalls). Exit instead,
-            # so go2rtc relaunches the whole pipeline with a fresh ffmpeg —
-            # recovery in ~1s.
-            log("downstream ffmpeg closed the pipe — exiting for a clean go2rtc "
-                "restart of the pipeline")
+            # Don't sit here writing into a dead pipe (the old behaviour looped
+            # forever, so go2rtc never restarted the exec and Frigate got nothing
+            # for hours). Exit so go2rtc relaunches the whole pipeline with a fresh
+            # ffmpeg. Back off briefly first: stream_once's finally just released
+            # the camera's single P2P slot, and this pause lets it settle so the
+            # relaunched process doesn't immediately reconnect into a still-held
+            # slot and churn the camera.
+            log("downstream ffmpeg closed the pipe — backing off, then exiting for "
+                "a clean go2rtc restart")
+            time.sleep(5)
             return
         except Exception as e:  # noqa: BLE001
             log(f"error: {e}; retry in 5s")
