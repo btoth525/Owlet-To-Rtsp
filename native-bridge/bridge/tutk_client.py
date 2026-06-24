@@ -33,6 +33,7 @@ import ctypes
 import os
 import struct
 import sys
+import threading
 import time
 from ctypes import (
     CDLL,
@@ -90,6 +91,80 @@ IOTC_ER_ALREADY_INITIALIZED = -3
 AV_ER_DATA_NOREADY = -20012
 AV_ER_REMOTE_TIMEOUT_DISCONNECT = -20015
 AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
+
+# --- audio probe (step 1: capture + report the camera's audio format) ---------
+# The Owlet cam carries audio on the same Kalay AV channel as video, but its codec
+# / sample rate are undocumented. This probe reads the audio channel READ-ONLY (it
+# never touches the video pipeline) and logs the exact codec_id + flags so we can
+# mux it correctly. Disable with OWLET_AUDIO=0.
+AUDIO_ENABLED = os.environ.get("OWLET_AUDIO", "1") != "0"
+# Standard TUTK "start audio" IOCTL (IOTYPE_USER_IPCAM_AUDIOSTART = 0x300 = 768).
+IOTYPE_AUDIOSTART = int(os.environ.get("OWLET_IOTYPE_AUDIOSTART") or "768")
+AUDIO_BUF = 16 * 1024
+# Best-effort decode tables for the log (raw values are logged too, so we don't
+# rely on these being right — they just annotate the report).
+_AUDIO_CODECS = {
+    0x86: "AAC", 0x87: "AAC", 0x88: "AAC", 0x89: "PCM(s16)", 0x8a: "ADPCM",
+    0x8b: "G711 u-law", 0x8c: "G711 a-law", 0x8d: "G726", 0x8e: "Speex",
+    0x8f: "MP3", 0x140: "AAC", 0x141: "AAC",
+}
+_AUDIO_RATES = {0: 8000, 1: 11025, 2: 12000, 3: 16000, 4: 22050,
+                5: 24000, 6: 32000, 7: 44100, 8: 48000}
+
+
+def _guess_audio(codec_id: int, flags: int) -> str:
+    codec = _AUDIO_CODECS.get(codec_id, f"unknown(0x{codec_id:04x})")
+    rate = _AUDIO_RATES.get((flags >> 2) & 0x0f, "?")
+    ch = "stereo" if (flags & 0x01) else "mono"
+    bits = 16 if (flags & 0x02) else 8
+    return f"codec≈{codec}, ~{rate}Hz, {ch}, {bits}-bit  (guess from flags — verify)"
+
+
+def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
+    """Capture the audio channel and report its format. Read-only — does not touch
+    video. Runs in its own thread; stops when stop_evt is set."""
+    if not hasattr(av, "avRecvAudioData"):
+        log("[audio] avRecvAudioData missing from this lib build — no audio capture")
+        return
+    abuf = create_string_buffer(AUDIO_BUF)
+    ainfo = create_string_buffer(FINFO_BUF)
+    aidx = c_uint(0)
+    frames = 0
+    reported = False
+    warned = False
+    last_log = time.time()
+    started = time.time()
+    while not stop_evt.is_set():
+        try:
+            rc = av.avRecvAudioData(av_idx, abuf, AUDIO_BUF, ainfo, FINFO_BUF, byref(aidx))
+        except Exception as e:  # noqa: BLE001
+            log(f"[audio] avRecvAudioData error: {e}")
+            return
+        if rc > 0:
+            frames += 1
+            if not reported:
+                info = ainfo.raw[:16]
+                codec_id = int.from_bytes(info[0:2], "little")
+                flags = info[2]
+                log("[audio] ===== AUDIO DETECTED =====")
+                log(f"[audio] codec_id=0x{codec_id:04x} flags=0x{flags:02x} "
+                    f"frame_size={rc}B info={info.hex()}")
+                log(f"[audio] first frame bytes: {abuf.raw[:min(rc, 24)].hex()}")
+                log(f"[audio] best guess: {_guess_audio(codec_id, flags)}")
+                log("[audio] >>> SHARE these [audio] lines — they tell us exactly how "
+                    "to mux sound. Video is unaffected by this probe.")
+                reported = True
+            if time.time() - last_log > 15:
+                log(f"[audio] {frames} audio frames captured")
+                last_log = time.time()
+        elif rc == AV_ER_DATA_NOREADY:
+            if not reported and not warned and time.time() - started > 12:
+                log("[audio] no audio 12s after AUDIOSTART — the cam may use a "
+                    "different audio-start IOCTL, or audio is muted. Video unaffected.")
+                warned = True
+            time.sleep(0.02)
+        else:
+            time.sleep(0.03)
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +314,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
     _set_sig(av, "avRecvFrameData2", c_int,
              [c_int, c_char_p, c_int, POINTER(c_int), POINTER(c_int),
               c_char_p, c_int, POINTER(c_int), POINTER(c_int)])
+    _set_sig(av, "avRecvAudioData", c_int,
+             [c_int, c_char_p, c_int, c_char_p, c_int, POINTER(c_uint)])
     if tutk is not None:
         _set_sig(tutk, "TUTK_SDK_Set_License_Key", c_int, [c_char_p])
         _set_sig(tutk, "TUTK_SDK_Set_Region", c_int, [c_int])
@@ -266,6 +343,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
 
     session = -1
     av_idx = -1
+    audio_stop = threading.Event()
+    audio_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -300,6 +379,19 @@ def stream_once(uid: str, sec_mode: int) -> int:
         payload = smsg_av_stream(AV_CHANNEL)
         av.avSendIOCtrl(av_idx, IOTYPE_START, c_char_p(payload), len(payload))
         log(f"sent IOTYPE_START={IOTYPE_START} payload={payload.hex()}")
+
+        # Kick off the audio probe alongside the video loop (read-only; reports the
+        # camera's audio codec/rate so we can mux sound next. Never blocks video.)
+        if AUDIO_ENABLED:
+            try:
+                ap = smsg_av_stream(AV_CHANNEL)
+                av.avSendIOCtrl(av_idx, IOTYPE_AUDIOSTART, c_char_p(ap), len(ap))
+                log(f"sent IOTYPE_AUDIOSTART={IOTYPE_AUDIOSTART}")
+                audio_thr = threading.Thread(
+                    target=_audio_probe, args=(av, av_idx, audio_stop), daemon=True)
+                audio_thr.start()
+            except Exception as e:  # noqa: BLE001
+                log(f"[audio] probe start failed: {e}")
 
         buf = create_string_buffer(FRAME_BUF)
         finfo = create_string_buffer(FINFO_BUF)
@@ -339,6 +431,10 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 time.sleep(0.02)
         return 0
     finally:
+        # Stop the audio probe first so it isn't mid-call on a channel we're closing.
+        audio_stop.set()
+        if audio_thr is not None:
+            audio_thr.join(timeout=2)
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
         if av_idx >= 0:
