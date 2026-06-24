@@ -233,7 +233,10 @@ def _exec_source(name: str) -> str:
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
         '-use_wallclock_as_timestamps 1 -thread_queue_size 1024 -f aac -i "$F" '
-        '-map 0:v -map 1:a? -c:v copy -c:a copy -bsf:a aac_adtstoasc '
+        # Re-encode AAC (don't copy): the camera's ADTS AAC has no global headers,
+        # which ffmpeg's RTSP muxer rejects ("AAC with no global headers"); the
+        # encoder emits proper headers. 16k mono is plenty for voice and ~free CPU.
+        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
         '-f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": name}
     return "exec:bash -c '" + cmd + "'"
