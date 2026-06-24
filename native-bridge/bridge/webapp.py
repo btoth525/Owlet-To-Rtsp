@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 import re
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -540,6 +542,128 @@ def restart_go2rtc():
 @app.post("/api/stream/restart")
 def restart_stream():
     restart_go2rtc()
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# talk-back + sound playback (send audio TO the camera speaker)
+# --------------------------------------------------------------------------- #
+PLAY_PROCS: dict = {}          # camera -> the current talk/play ffmpeg process
+_PLAY_LOCK = threading.Lock()
+SOUND_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
+
+
+def _ffmpeg_to_speaker(camera: str, input_args: list) -> tuple[bool, str]:
+    """Transcode an audio source to AAC-LC 8kHz mono ADTS and stream it (paced to
+    real time with -re) into the camera's talk FIFO; tutk_client plays it out the
+    speaker. Any previous playback for that camera is interrupted."""
+    fifo = cs.talk_fifo_path(camera)
+    if not os.path.exists(fifo):
+        return False, "camera isn't streaming yet — start its stream first"
+    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + input_args
+           + ["-ac", "1", "-ar", "8000", "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
+    with _PLAY_LOCK:
+        old = PLAY_PROCS.get(camera)
+        if old and old.poll() is None:
+            try:
+                old.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            PLAY_PROCS[camera] = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            return False, f"ffmpeg failed: {e}"
+    return True, "playing"
+
+
+@app.get("/api/sounds")
+def list_sounds():
+    try:
+        files = sorted(f for f in os.listdir(cs.SOUNDS_DIR)
+                       if f.lower().endswith(SOUND_EXTS))
+    except OSError:
+        files = []
+    return jsonify({"sounds": files})
+
+
+@app.post("/api/sounds")
+def upload_sound():
+    from werkzeug.utils import secure_filename
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "no file received"}), 400
+    name = secure_filename(f.filename)
+    if not name.lower().endswith(SOUND_EXTS):
+        return jsonify({"ok": False, "error": "audio files only (mp3/wav/m4a/aac/ogg)"}), 400
+    try:
+        os.makedirs(cs.SOUNDS_DIR, exist_ok=True)
+        f.save(os.path.join(cs.SOUNDS_DIR, name))
+    except OSError as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"can't save ({e.strerror}) — is /config writable?"}), 500
+    log(f"[sounds] uploaded {name}")
+    return jsonify({"ok": True, "name": name})
+
+
+@app.delete("/api/sounds/<path:fname>")
+def delete_sound(fname):
+    from werkzeug.utils import secure_filename
+    try:
+        os.remove(os.path.join(cs.SOUNDS_DIR, secure_filename(fname)))
+    except OSError:
+        pass
+    return jsonify({"ok": True})
+
+
+@app.post("/api/play/<camera>")
+def play_sound(camera):
+    from werkzeug.utils import secure_filename
+    fname = secure_filename((request.json or {}).get("file", ""))
+    path = os.path.join(cs.SOUNDS_DIR, fname)
+    if not fname or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "sound not found"}), 404
+    ok, msg = _ffmpeg_to_speaker(camera, ["-re", "-i", path])
+    log(f"[play] {camera}: {fname} -> {msg}")
+    return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
+
+
+@app.post("/api/talk/<camera>")
+def talk(camera):
+    """Play a recorded mic clip out the camera speaker (hold-to-talk)."""
+    f = request.files.get("audio")
+    if not f:
+        return jsonify({"ok": False, "error": "no audio received"}), 400
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dat")
+    f.save(tmp.name)
+    tmp.close()
+    ok, msg = _ffmpeg_to_speaker(camera, ["-re", "-i", tmp.name])
+
+    # clean the temp once ffmpeg is done with it
+    def _cleanup():
+        p = PLAY_PROCS.get(camera)
+        if p:
+            try:
+                p.wait(timeout=60)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+    threading.Thread(target=_cleanup, daemon=True).start()
+    return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
+
+
+@app.post("/api/talk/<camera>/stop")
+def talk_stop(camera):
+    with _PLAY_LOCK:
+        p = PLAY_PROCS.get(camera)
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
     return jsonify({"ok": True})
 
 

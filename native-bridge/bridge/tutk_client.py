@@ -121,6 +121,97 @@ def _guess_audio(codec_id: int, flags: int) -> str:
     return f"codec≈{codec}, ~{rate}Hz, {ch}, {bits}-bit  (guess from flags — verify)"
 
 
+# --- two-way talk / sound playback: send audio TO the camera's speaker ---------
+# Recovered from the Owlet app: it sends IOTYPE_USER_IPCAM_SPEAKERSTART (848), then
+# pushes AAC-LC 8kHz mono frames via avSendAudioData. We read AAC (ADTS) from
+# OWLET_TALK_FIFO (written by the web UI's "hold to talk" / "play sound"), strip
+# the ADTS header to raw AAC access units, and send them; SPEAKERSTOP (849) on idle.
+IOTYPE_SPEAKERSTART = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART") or "848")
+IOTYPE_SPEAKERSTOP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTOP") or "849")
+TALK_FIFO = os.environ.get("OWLET_TALK_FIFO", "")
+
+
+def _talk_frameinfo(ts_ms: int) -> bytes:
+    # FRAMEINFO_t the camera expects for sent audio: codec_id=0x88 (AAC),
+    # flags=0x02 (8kHz mono 16-bit) — same format it streams to us; ts at off 12.
+    return (struct.pack("<HBBB", 0x88, 0x02, 0x00, 0x01) + b"\x00" * 7
+            + struct.pack("<I", ts_ms & 0xFFFFFFFF))
+
+
+def _send_adts(av, av_idx, buf: bytes, ts0: float) -> bytes:
+    """Parse ADTS AAC frames from buf, send each as a raw AAC access unit via
+    avSendAudioData. Returns leftover bytes (an incomplete trailing frame)."""
+    i, n = 0, len(buf)
+    while n - i >= 7:
+        if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:   # ADTS sync 0xFFFx
+            i += 1
+            continue
+        frame_len = ((buf[i + 3] & 0x03) << 11) | (buf[i + 4] << 3) | (buf[i + 5] >> 5)
+        if frame_len < 7:
+            i += 1
+            continue
+        if n - i < frame_len:
+            break  # frame not fully buffered yet
+        hdr = 7 if (buf[i + 1] & 0x01) else 9   # protection_absent -> 7-byte header
+        raw = buf[i + hdr:i + frame_len]
+        fi = _talk_frameinfo(int((time.time() - ts0) * 1000))
+        av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
+        i += frame_len
+    return buf[i:]
+
+
+def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
+    """Play whatever AAC arrives on the talk FIFO out the camera's speaker."""
+    if not TALK_FIFO or not hasattr(av, "avSendAudioData"):
+        return
+    try:
+        # O_RDWR so the FIFO never EOFs / blocks when no writer is connected.
+        fd = os.open(TALK_FIFO, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as e:  # noqa: BLE001
+        log(f"[talk] cannot open {TALK_FIFO}: {e}")
+        return
+    buf = b""
+    speaking = False
+    last_audio = 0.0
+    ts0 = time.time()
+
+    def _spk(ioctl):
+        sp = smsg_av_stream(AV_CHANNEL)
+        av.avSendIOCtrl(av_idx, ioctl, c_char_p(sp), len(sp))
+
+    try:
+        while not stop_evt.is_set():
+            try:
+                chunk = os.read(fd, 8192)
+            except BlockingIOError:
+                chunk = b""
+            if chunk:
+                if not speaking:
+                    _spk(IOTYPE_SPEAKERSTART)
+                    speaking = True
+                    ts0 = time.time()
+                    log("[talk] speaker on")
+                buf = _send_adts(av, av_idx, buf + chunk, ts0)
+                last_audio = time.monotonic()
+            else:
+                if speaking and time.monotonic() - last_audio > 0.8:
+                    _spk(IOTYPE_SPEAKERSTOP)
+                    speaking = False
+                    buf = b""
+                    log("[talk] speaker off (idle)")
+                time.sleep(0.02)
+    finally:
+        if speaking:
+            try:
+                _spk(IOTYPE_SPEAKERSTOP)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            os.close(fd)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     """Capture the audio channel and, if OWLET_AUDIO_FIFO is set, write its raw
     bytes to that FIFO so ffmpeg can mux the audio next to the video. Read-only
@@ -345,6 +436,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
               c_char_p, c_int, POINTER(c_int), POINTER(c_int)])
     _set_sig(av, "avRecvAudioData", c_int,
              [c_int, c_char_p, c_int, c_char_p, c_int, POINTER(c_uint)])
+    _set_sig(av, "avSendAudioData", c_int,
+             [c_int, c_char_p, c_int, c_char_p, c_int])
     if tutk is not None:
         _set_sig(tutk, "TUTK_SDK_Set_License_Key", c_int, [c_char_p])
         _set_sig(tutk, "TUTK_SDK_Set_Region", c_int, [c_int])
@@ -374,6 +467,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
     av_idx = -1
     audio_stop = threading.Event()
     audio_thr = None
+    talk_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -423,6 +517,16 @@ def stream_once(uid: str, sec_mode: int) -> int:
             except Exception as e:  # noqa: BLE001
                 log(f"[audio] probe start failed: {e}")
 
+        # Talk / sound-playback: play AAC arriving on the talk FIFO out the speaker.
+        if TALK_FIFO:
+            try:
+                talk_thr = threading.Thread(
+                    target=_talk_thread, args=(av, av_idx, audio_stop), daemon=True)
+                talk_thr.start()
+                log(f"[talk] listening for audio on {TALK_FIFO}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[talk] start failed: {e}")
+
         buf = create_string_buffer(FRAME_BUF)
         finfo = create_string_buffer(FINFO_BUF)
         actual = c_int(0); expected = c_int(0); finfo_len = c_int(0); frmno = c_int(0)
@@ -461,10 +565,13 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 time.sleep(0.02)
         return 0
     finally:
-        # Stop the audio probe first so it isn't mid-call on a channel we're closing.
+        # Stop the audio + talk threads first so they aren't mid-call on a channel
+        # we're closing (audio_stop is shared by both).
         audio_stop.set()
         if audio_thr is not None:
             audio_thr.join(timeout=2)
+        if talk_thr is not None:
+            talk_thr.join(timeout=2)
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
         if av_idx >= 0:

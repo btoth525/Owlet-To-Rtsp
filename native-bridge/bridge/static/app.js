@@ -199,7 +199,79 @@ async function refreshCameras() {
   $("cameras-empty").style.display = data.cameras.length ? "none" : "flex";
   $("cam-count").textContent = data.cameras.length
     ? `${data.cameras.length} camera${data.cameras.length>1?"s":""}` : "";
+  syncTalkCams(data.cameras.map(c => c.name));
 }
+
+/* ---------- talk & sounds (send audio TO the camera speaker) ---------- */
+function syncTalkCams(names){
+  const sel = $("talk-cam"); if(!sel) return;
+  const cur = sel.value;
+  const want = names.join(",");
+  if (sel.dataset.names === want) return;       // unchanged
+  sel.dataset.names = want;
+  sel.innerHTML = names.map(n => `<option>${n}</option>`).join("");
+  if (names.includes(cur)) sel.value = cur;
+  $("card-talk").style.display = names.length ? "" : "none";
+}
+function talkCam(){ const s=$("talk-cam"); return (s && s.value) || "owlet"; }
+
+async function loadSounds(){
+  let data; try { data = await (await fetch("/api/sounds")).json(); } catch(e){ return; }
+  const box = $("sound-list"); if(!box) return;
+  if (!data.sounds.length){ box.innerHTML = `<span class="hint">No sounds yet — drop some lullaby MP3s above.</span>`; return; }
+  box.innerHTML = "";
+  for (const f of data.sounds){
+    const row = document.createElement("div"); row.className = "snd-row";
+    row.innerHTML = `<button class="mini snd-play">▶</button><span class="snd-name">${f}</span>
+      <span class="spacer"></span><button class="mini snd-del danger">🗑</button>`;
+    row.querySelector(".snd-play").onclick = async () => {
+      const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f})});
+      const j = await r.json(); toast(r.ok ? `▶ ${f} → ${talkCam()}` : (j.error||"couldn't play"), r.ok?"good":"bad");
+    };
+    row.querySelector(".snd-del").onclick = async () => {
+      if(!confirm(`Delete ${f}?`)) return;
+      await fetch(`/api/sounds/${encodeURIComponent(f)}`, {method:"DELETE"}); loadSounds();
+    };
+    box.appendChild(row);
+  }
+}
+function uploadSounds(files){
+  if(!files || !files.length) return;
+  const prog=$("snd-prog"), bar=$("snd-bar"); prog.classList.add("show"); bar.style.width="0%";
+  let done=0;
+  const one = (f) => new Promise(res => {
+    const fd=new FormData(); fd.append("file", f);
+    const xhr=new XMLHttpRequest(); xhr.open("POST","/api/sounds");
+    xhr.onload=()=>{ done++; bar.style.width=Math.round(done/files.length*100)+"%"; res(); };
+    xhr.onerror=()=>{ done++; res(); };
+    xhr.send(fd);
+  });
+  toast(`Uploading ${files.length} sound(s)…`,"");
+  Promise.all([...files].map(one)).then(()=>{
+    setTimeout(()=>prog.classList.remove("show"), 700);
+    toast("Sounds uploaded.","good"); loadSounds();
+  });
+}
+
+let _mediaRec=null, _chunks=[];
+async function startTalk(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    _chunks=[]; _mediaRec=new MediaRecorder(stream);
+    _mediaRec.ondataavailable = e => { if(e.data.size) _chunks.push(e.data); };
+    _mediaRec.onstop = async () => {
+      stream.getTracks().forEach(t=>t.stop());
+      const blob=new Blob(_chunks,{type:_mediaRec.mimeType||"audio/webm"});
+      const fd=new FormData(); fd.append("audio", blob, "talk.webm");
+      const r=await fetch(`/api/talk/${talkCam()}`,{method:"POST",body:fd});
+      const j=await r.json(); $("talk-status").textContent="";
+      toast(r.ok?"🔊 sent to the room":(j.error||"talk failed"), r.ok?"good":"bad");
+    };
+    _mediaRec.start();
+    $("talk-status").textContent="🔴 recording… release to send";
+  }catch(e){ toast("Mic blocked — allow microphone access (needs https or localhost).","warn"); }
+}
+function stopTalk(){ if(_mediaRec && _mediaRec.state!=="inactive") _mediaRec.stop(); }
 
 async function addCamera(btn) {
   return withLoading(btn, async () => {
@@ -341,10 +413,28 @@ $("btn-copy").onclick  = async () => {
   toast(ok ? "Log copied." : "Couldn't copy — select the text and Ctrl+C.", ok ? "good" : "warn");
 };
 
+/* talk & sounds wire-up */
+(function(){
+  const t=$("btn-talk");
+  const down=(e)=>{ e.preventDefault(); t.classList.add("rec"); startTalk(); };
+  const up=(e)=>{ e.preventDefault(); t.classList.remove("rec"); stopTalk(); };
+  t.addEventListener("mousedown",down); t.addEventListener("touchstart",down,{passive:false});
+  t.addEventListener("mouseup",up);     t.addEventListener("mouseleave",up);
+  t.addEventListener("touchend",up,{passive:false});
+  $("btn-stop-sound").onclick=async()=>{ await fetch(`/api/talk/${talkCam()}/stop`,{method:"POST"}); toast("Stopped.",""); };
+  $("btn-sound-browse").onclick=()=>$("sound-file").click();
+  $("sound-file").onchange=(e)=>uploadSounds(e.target.files);
+  const dz=$("sound-drop");
+  ["dragover","dragenter"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add("over");}));
+  ["dragleave","drop"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove("over");}));
+  dz.addEventListener("drop",e=>uploadSounds(e.dataTransfer.files));
+})();
+
 loadAccount();
 startLogStream();
 refreshStatus();
 refreshCameras();
 refreshFindings();
+loadSounds();
 setInterval(refreshStatus, 5000);
 setInterval(refreshCameras, 5000);

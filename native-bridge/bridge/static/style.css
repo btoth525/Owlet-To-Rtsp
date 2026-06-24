@@ -140,6 +140,20 @@ button.danger{color:var(--bad)}
 button.danger:hover{border-color:var(--bad)}
 #cameras-empty{display:flex}
 
+/* ---- talk & sounds ---- */
+#talk-cam{width:auto;min-width:120px;font-size:13px;padding:5px 8px}
+.talk-btn{font-size:15px;padding:12px 22px;user-select:none;touch-action:none}
+.talk-btn.rec{background:var(--bad);border-color:var(--bad);color:#fff;
+  box-shadow:0 0 0 4px rgba(255,93,93,.25);animation:pulse 1s infinite}
+.dropzone{margin-top:14px;border:1.5px dashed var(--line);border-radius:10px;
+  padding:18px;text-align:center;color:var(--muted);font-size:13.5px;background:#0e1318}
+.dropzone.over{border-color:var(--accent);background:rgba(63,167,255,.08);color:var(--fg)}
+.sound-list{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.snd-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);
+  border-radius:8px;background:#0e1318}
+.snd-row .snd-play{font-size:13px;color:var(--good);border-color:rgba(57,217,138,.35)}
+.snd-name{font-size:13.5px;word-break:break-all}
+
 /* ---- toasts ---- */
 .toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:#1c232c;border:1px solid var(--line);border-left:3px solid var(--accent);

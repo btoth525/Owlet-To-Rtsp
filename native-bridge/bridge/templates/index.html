@@ -81,6 +81,24 @@
       </div>
     </section>
 
+    <!-- ============ TALK & SOUNDS ============ -->
+    <section class="card" id="card-talk">
+      <h2>🎙️ Talk &amp; sounds <span class="spacer"></span>
+        <select id="talk-cam" title="which camera"></select></h2>
+      <p class="hint">Speak into the room, or play a lullaby out the camera's speaker. Two‑way audio 🍼</p>
+      <div class="row">
+        <button id="btn-talk" class="primary talk-btn">🎤 Hold to talk</button>
+        <button id="btn-stop-sound">⏹ Stop</button>
+        <span class="hint" id="talk-status"></span>
+      </div>
+      <div id="sound-drop" class="dropzone">
+        <input type="file" id="sound-file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg" multiple hidden>
+        🎵 Drag &amp; drop lullaby files here, or <button id="btn-sound-browse" class="mini">browse</button>
+        <div class="prog" id="snd-prog"><div class="bar" id="snd-bar"></div></div>
+      </div>
+      <div id="sound-list" class="sound-list"></div>
+    </section>
+
     <!-- ============ LIBRARIES ============ -->
     <section class="card" id="card-libs">
       <h2>🧩 TUTK libraries</h2>
