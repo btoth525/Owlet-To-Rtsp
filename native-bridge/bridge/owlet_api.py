@@ -25,6 +25,7 @@ import requests
 REGIONS: dict[str, dict[str, str]] = {
     "world": {
         "firebase_key": "AIzaSyCsDZ8kWxQuLJAMVnmEhEkayH1TSxKXfGA",
+        "mini": "https://ayla-sso.owletdata.com/mini/",
         "sign_in": "https://user-field-1a2039d9.aylanetworks.com/api/v1/token_sign_in",
         "base": "https://ads-field-1a2039d9.aylanetworks.com/apiv1",
         "app_id": "sso-prod-3g-id",
@@ -32,6 +33,8 @@ REGIONS: dict[str, dict[str, str]] = {
     },
     "europe": {
         "firebase_key": "AIzaSyDm6EhV70wudwN3iOSq3vTjtsdGjdFLuuM",
+        # NB: EU uses the .eu. mini host (world host returns 401 for EU users).
+        "mini": "https://ayla-sso.eu.owletdata.com/mini/",
         "sign_in": "https://user-field-eu-1a2039d9.aylanetworks.com/api/v1/token_sign_in",
         "base": "https://ads-field-eu-1a2039d9.aylanetworks.com/apiv1",
         "app_id": "OwletCare-Android-EU-fw-id",
@@ -41,7 +44,6 @@ REGIONS: dict[str, dict[str, str]] = {
 
 FIREBASE_URL = ("https://www.googleapis.com/identitytoolkit/v3/relyingparty/"
                 "verifyPassword?key={key}")
-MINI_URL = "https://ayla-sso.owletdata.com/mini/"
 # Camera Key-Management Service: returns the Kalay tutkid/UID + AuthKey + AV
 # password for a camera DSN, authorized with the raw Firebase idToken.
 KMS_URL = "https://camera-kms.owletdata.com/kms/{dsn}"
@@ -146,7 +148,7 @@ class OwletAPI:
     # -- step 2: Ayla SSO mini token ---------------------------------------
     def _mini(self, jwt: str) -> str:
         self.log("[2/4] GET ayla-sso mini token …")
-        r = self.s.get(MINI_URL, headers={"Authorization": jwt}, timeout=20)
+        r = self.s.get(self.cfg["mini"], headers={"Authorization": jwt}, timeout=20)
         if r.status_code != 200:
             self.log(f"      mini HTTP {r.status_code}: {r.text[:300]}")
             raise OwletError(f"ayla-sso mini failed ({r.status_code})")
@@ -190,6 +192,29 @@ class OwletAPI:
     def devices(self) -> list[dict]:
         data = self._ayla_get("/devices.json")
         return [d.get("device", d) for d in data] if isinstance(data, list) else []
+
+    def activate(self, dsn: str) -> bool:
+        """POST APP_ACTIVE=1 so the Smart Sock streams live vitals.
+
+        The sock only publishes fresh REAL_TIME_VITALS while the app (or us)
+        pokes this datapoint; without it the properties go stale. Must be
+        called right before each properties read (pyowletapi does this on
+        every poll). Returns True on success.
+        """
+        if not self.access_token:
+            self.authenticate()
+        url = f"{self.cfg['base']}/dsns/{dsn}/properties/APP_ACTIVE/datapoints.json"
+        try:
+            r = self.s.post(
+                url,
+                headers={"Authorization": f"auth_token {self.access_token}"},
+                json={"datapoint": {"metadata": {}, "value": 1}},
+                timeout=15,
+            )
+            return r.status_code in (200, 201)
+        except requests.RequestException as e:
+            self.log(f"      APP_ACTIVE({dsn}) error: {e}")
+            return False
 
     # -- the important bit: dump everything, hunt for the cam ---------------
     def diagnose(self) -> dict:

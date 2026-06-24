@@ -154,6 +154,26 @@ button.danger:hover{border-color:var(--bad)}
 .snd-row .snd-play{font-size:13px;color:var(--good);border-color:rgba(57,217,138,.35)}
 .snd-name{font-size:13.5px;word-break:break-all}
 
+/* ---- sensors / vitals ---- */
+.vitals-wrap{display:flex;flex-direction:column;gap:14px;margin-top:6px}
+.vcard{border:1px solid var(--line);border-radius:14px;padding:16px 16px 14px;position:relative;overflow:hidden}
+.vcard.glass{
+  background:linear-gradient(135deg,rgba(63,167,255,.10),rgba(120,90,255,.06) 60%,rgba(57,217,138,.05));
+  border-color:rgba(120,160,220,.22);
+  box-shadow:0 8px 30px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06);
+  backdrop-filter:blur(8px) saturate(140%);-webkit-backdrop-filter:blur(8px) saturate(140%);
+}
+.vhead{display:flex;align-items:center;gap:10px;font-weight:600;font-size:14px;margin-bottom:12px}
+.vmodel{font:11.5px ui-monospace,Menlo,Consolas,monospace;color:var(--muted);font-weight:400}
+.vgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:10px}
+.vchip{display:flex;flex-direction:column;align-items:center;gap:2px;padding:12px 8px;border-radius:12px;
+  background:rgba(8,12,18,.45);border:1px solid rgba(255,255,255,.06);text-align:center}
+.vchip .vi{font-size:20px;line-height:1}
+.vchip .vv{font-size:19px;font-weight:700;letter-spacing:.01em}
+.vchip .vl{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.vchip.dim{opacity:.4}
+.vts{text-align:right;margin-top:-4px}
+
 /* ---- toasts ---- */
 .toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:#1c232c;border:1px solid var(--line);border-left:3px solid var(--accent);

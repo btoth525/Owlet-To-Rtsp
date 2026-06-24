@@ -400,7 +400,66 @@ async function discover(btn) {
   });
 }
 
+/* ---------- sensors / vitals ---------- */
+const SLEEP_STATES = {0:"Unknown",1:"Awake",8:"Light sleep",15:"Deep sleep"};
+const VITAL_META = {
+  heart_rate:{icon:"❤️",label:"Heart rate",unit:" bpm"},
+  oxygen:{icon:"🫁",label:"Oxygen",unit:"%"},
+  skin_temperature:{icon:"🌡️",label:"Skin temp",unit:"°C"},
+  sleep_state:{icon:"😴",label:"Sleep",unit:"",enum:SLEEP_STATES},
+  movement:{icon:"🤸",label:"Movement",unit:""},
+  battery:{icon:"🔋",label:"Sock battery",unit:"%"},
+  battery_minutes:{icon:"⏳",label:"Battery left",unit:" min"},
+  base_station_on:{icon:"📡",label:"Base station",unit:"",bool:1},
+  charging:{icon:"⚡",label:"Charging",unit:"",bool:1},
+  signal_strength:{icon:"📶",label:"Signal",unit:" dBm"},
+  temperature:{icon:"🌡️",label:"Room temp",unit:"°C"},
+  humidity:{icon:"💧",label:"Humidity",unit:"%"},
+  noise:{icon:"🔊",label:"Noise",unit:" dB"},
+  brightness:{icon:"💡",label:"Brightness",unit:""},
+};
+const VITAL_ORDER = Object.keys(VITAL_META);
+function fmtVital(k,v){
+  const m=VITAL_META[k]||{unit:""};
+  if(v===null||v===undefined||v==="") return "—";
+  if(m.enum) return m.enum[v]||v;
+  if(m.bool) return (v&&v!=="0")?"On":"Off";
+  return v+m.unit;
+}
+async function probeSensors(btn){
+  return withLoading(btn, async () => {
+    const r = await fetch("/api/vitals/discover",{method:"POST"});
+    if(!r.ok){ toast("Add your Owlet account first.","warn"); return; }
+    toast("Probing your Owlet devices… watch the log.","");
+    setTimeout(loadVitals, 4000);
+    setTimeout(loadVitals, 9000);
+  });
+}
+async function loadVitals(){
+  let data; try { data = await (await fetch("/api/vitals")).json(); } catch(e){ return; }
+  const wrap=$("vitals-wrap");
+  const devs=(data&&data.devices)||[];
+  const withReadings=devs.filter(d=>d.sensors&&Object.values(d.sensors).some(v=>v!==null&&v!==undefined&&v!==""));
+  if(!withReadings.length){ return; }  // keep the empty hint until we have data
+  const age = data.ts ? Math.round(Date.now()/1000 - data.ts) : null;
+  wrap.innerHTML = withReadings.map(d=>{
+    const keys=VITAL_ORDER.filter(k=>k in d.sensors);
+    const chips=keys.map(k=>{
+      const m=VITAL_META[k]; const v=d.sensors[k];
+      const dim=(v===null||v===undefined||v==="")?" dim":"";
+      return `<div class="vchip${dim}"><span class="vi">${m.icon}</span>
+        <span class="vv">${fmtVital(k,v)}</span><span class="vl">${m.label}</span></div>`;
+    }).join("");
+    const badge=d.kind==="sock"?"🍼 Smart Sock":(d.kind==="cam"?"📷 Camera":"📦 Device");
+    return `<div class="vcard glass"><div class="vhead">${badge}
+      <span class="vmodel">${d.model||d.dsn}</span></div>
+      <div class="vgrid">${chips||"<span class='hint'>no recognized sensors</span>"}</div></div>`;
+  }).join("");
+  if(age!==null){ wrap.innerHTML += `<div class="vts hint">updated ${age}s ago</div>`; }
+}
+
 /* ---------- wire up ---------- */
+$("btn-probe").onclick = (e) => probeSensors(e.currentTarget);
 $("btn-save-account").onclick = (e) => saveAccount(e.currentTarget);
 $("btn-testlogin").onclick = (e) => testLogin(e.currentTarget);
 $("btn-add-cam").onclick = (e) => addCamera(e.currentTarget);
@@ -436,5 +495,7 @@ refreshStatus();
 refreshCameras();
 refreshFindings();
 loadSounds();
+loadVitals();
 setInterval(refreshStatus, 5000);
+setInterval(loadVitals, 30000);
 setInterval(refreshCameras, 5000);

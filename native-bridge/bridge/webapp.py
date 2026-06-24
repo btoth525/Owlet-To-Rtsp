@@ -337,6 +337,84 @@ def diagnose():
     return jsonify({"ok": True})
 
 
+# --------------------------------------------------------------------------- #
+# Owlet sensors / vitals (Smart Sock + Cam room sensors)
+# --------------------------------------------------------------------------- #
+VITALS_DIR = os.path.join(cs.CONFIG_DIR, "vitals")
+VITALS_CACHE = os.path.join(VITALS_DIR, "snapshot.json")
+
+
+def _vitals_worker(cfg: dict):
+    STATE["busy"] = True
+    try:
+        from owlet_api import OwletAPI, OwletError
+        from owlet_vitals import OwletVitals, unit_for
+        if not cfg.get("email") or not cfg.get("password"):
+            log("!! enter your Owlet email + password first.")
+            return
+        api = OwletAPI(cfg["region"], cfg["email"], cfg["password"], log=log)
+        vit = OwletVitals(api, log=log)
+        try:
+            snap = vit.snapshot()
+        except OwletError as e:
+            log(f"!! login failed: {e}")
+            return
+        except Exception as e:  # noqa: BLE001
+            log(f"!! vitals error: {e}")
+            return
+        log(f"[vitals] {len(snap)} Ayla device(s) on the account")
+        for d in snap:
+            log(f"\n  ── {d['kind'].upper()}  dsn={d['dsn']}  model={d['model']}  ({d['name']})")
+            if d["sensors"]:
+                pretty = ", ".join(
+                    f"{k}={v}{unit_for(k)}" for k, v in d["sensors"].items() if v is not None)
+                log(f"     sensors: {pretty or '(all null — sock may be asleep)'}")
+            else:
+                log("     sensors: none recognized")
+            log(f"     all properties ({len(d['raw_props'])}):")
+            for name in d["raw_props"]:
+                val = d["raw_props"][name]
+                sval = str(val)
+                if len(sval) > 120:
+                    sval = sval[:117] + "…"
+                log(f"        {name} = {sval}")
+        try:
+            os.makedirs(VITALS_DIR, exist_ok=True)
+            with open(VITALS_CACHE, "w") as f:
+                import json as _json
+                _json.dump({"ts": time.time(), "devices": snap}, f)
+        except Exception as e:  # noqa: BLE001
+            log(f"[vitals] cache write failed: {e}")
+        log("\n[vitals] done — copy the property names above and we'll map them.")
+    finally:
+        STATE["busy"] = False
+
+
+@app.post("/api/vitals/discover")
+def vitals_discover():
+    if STATE["busy"]:
+        return jsonify({"error": "already running"}), 409
+    cfg = cs.load_config()
+    if not cfg.get("email") or not cfg.get("password"):
+        return jsonify({"ok": False, "error": "no account configured"}), 400
+    LOG.clear()
+    log("=== Owlet sensor discovery ===")
+    threading.Thread(target=_vitals_worker, args=(cfg,), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/vitals")
+def vitals_latest():
+    try:
+        import json as _json
+        with open(VITALS_CACHE) as f:
+            return jsonify(_json.load(f))
+    except FileNotFoundError:
+        return jsonify({"ts": None, "devices": []})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ts": None, "devices": [], "error": str(e)})
+
+
 @app.get("/api/logs")
 def logs():
     def gen():
