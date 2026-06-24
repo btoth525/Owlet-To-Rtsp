@@ -30,6 +30,7 @@ in TUTK_LIB_DIR.
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import os
 import struct
 import sys
@@ -121,11 +122,14 @@ def _guess_audio(codec_id: int, flags: int) -> str:
 
 
 def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
-    """Capture the audio channel and report its format. Read-only — does not touch
-    video. Runs in its own thread; stops when stop_evt is set."""
+    """Capture the audio channel and, if OWLET_AUDIO_FIFO is set, write its raw
+    bytes to that FIFO so ffmpeg can mux the audio next to the video. Read-only
+    w.r.t. the video pipeline (never blocks the picture). Runs in its own thread."""
     if not hasattr(av, "avRecvAudioData"):
         log("[audio] avRecvAudioData missing from this lib build — no audio capture")
         return
+    fifo_path = os.environ.get("OWLET_AUDIO_FIFO", "")
+    fifo_fd = -1
     abuf = create_string_buffer(AUDIO_BUF)
     ainfo = create_string_buffer(FINFO_BUF)
     aidx = c_uint(0)
@@ -134,37 +138,62 @@ def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     warned = False
     last_log = time.time()
     started = time.time()
-    while not stop_evt.is_set():
-        try:
-            rc = av.avRecvAudioData(av_idx, abuf, AUDIO_BUF, ainfo, FINFO_BUF, byref(aidx))
-        except Exception as e:  # noqa: BLE001
-            log(f"[audio] avRecvAudioData error: {e}")
-            return
-        if rc > 0:
-            frames += 1
-            if not reported:
-                info = ainfo.raw[:16]
-                codec_id = int.from_bytes(info[0:2], "little")
-                flags = info[2]
-                log("[audio] ===== AUDIO DETECTED =====")
-                log(f"[audio] codec_id=0x{codec_id:04x} flags=0x{flags:02x} "
-                    f"frame_size={rc}B info={info.hex()}")
-                log(f"[audio] first frame bytes: {abuf.raw[:min(rc, 24)].hex()}")
-                log(f"[audio] best guess: {_guess_audio(codec_id, flags)}")
-                log("[audio] >>> SHARE these [audio] lines — they tell us exactly how "
-                    "to mux sound. Video is unaffected by this probe.")
-                reported = True
-            if time.time() - last_log > 15:
-                log(f"[audio] {frames} audio frames captured")
-                last_log = time.time()
-        elif rc == AV_ER_DATA_NOREADY:
-            if not reported and not warned and time.time() - started > 12:
-                log("[audio] no audio 12s after AUDIOSTART — the cam may use a "
-                    "different audio-start IOCTL, or audio is muted. Video unaffected.")
-                warned = True
-            time.sleep(0.02)
-        else:
-            time.sleep(0.03)
+    try:
+        while not stop_evt.is_set():
+            try:
+                rc = av.avRecvAudioData(av_idx, abuf, AUDIO_BUF, ainfo, FINFO_BUF, byref(aidx))
+            except Exception as e:  # noqa: BLE001
+                log(f"[audio] avRecvAudioData error: {e}")
+                return
+            if rc > 0:
+                frames += 1
+                if not reported:
+                    info = ainfo.raw[:16]
+                    codec_id = int.from_bytes(info[0:2], "little")
+                    flags = info[2]
+                    log("[audio] ===== AUDIO DETECTED =====")
+                    log(f"[audio] codec_id=0x{codec_id:04x} flags=0x{flags:02x} "
+                        f"frame_size={rc}B info={info.hex()}")
+                    log(f"[audio] first frame bytes: {abuf.raw[:min(rc, 24)].hex()}")
+                    log(f"[audio] best guess: {_guess_audio(codec_id, flags)}")
+                    reported = True
+                # Open the FIFO non-blocking (retry until ffmpeg opens the read end),
+                # then switch it to blocking so each frame is written WHOLE — keeping
+                # the AAC/ADTS framing intact (a partial write would corrupt it).
+                if fifo_fd < 0 and fifo_path:
+                    try:
+                        fifo_fd = os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+                        fl = fcntl.fcntl(fifo_fd, fcntl.F_GETFL)
+                        fcntl.fcntl(fifo_fd, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+                        log(f"[audio] muxing audio -> {fifo_path}")
+                    except OSError:
+                        fifo_fd = -1  # no reader yet; try again on the next frame
+                if fifo_fd >= 0:
+                    try:
+                        os.write(fifo_fd, abuf.raw[:rc])
+                    except (BrokenPipeError, OSError):
+                        try:
+                            os.close(fifo_fd)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        fifo_fd = -1  # ffmpeg went away; reopen when it's back
+                if time.time() - last_log > 30:
+                    log(f"[audio] {frames} audio frames forwarded")
+                    last_log = time.time()
+            elif rc == AV_ER_DATA_NOREADY:
+                if not reported and not warned and time.time() - started > 12:
+                    log("[audio] no audio 12s after AUDIOSTART — the cam may use a "
+                        "different audio-start IOCTL, or audio is muted. Video unaffected.")
+                    warned = True
+                time.sleep(0.02)
+            else:
+                time.sleep(0.03)
+    finally:
+        if fifo_fd >= 0:
+            try:
+                os.close(fifo_fd)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -380,9 +409,10 @@ def stream_once(uid: str, sec_mode: int) -> int:
         av.avSendIOCtrl(av_idx, IOTYPE_START, c_char_p(payload), len(payload))
         log(f"sent IOTYPE_START={IOTYPE_START} payload={payload.hex()}")
 
-        # Kick off the audio probe alongside the video loop (read-only; reports the
-        # camera's audio codec/rate so we can mux sound next. Never blocks video.)
-        if AUDIO_ENABLED:
+        # Kick off audio capture alongside the video loop. It reports the codec and,
+        # when the exec gave us an OWLET_AUDIO_FIFO, feeds AAC into it for muxing.
+        # Always run when a FIFO is present so ffmpeg's audio input never starves.
+        if AUDIO_ENABLED or os.environ.get("OWLET_AUDIO_FIFO"):
             try:
                 ap = smsg_av_stream(AV_CHANNEL)
                 av.avSendIOCtrl(av_idx, IOTYPE_AUDIOSTART, c_char_p(ap), len(ap))

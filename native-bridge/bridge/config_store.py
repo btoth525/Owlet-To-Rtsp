@@ -217,12 +217,25 @@ def _write_env(path: str, env: dict[str, str]) -> None:
 
 
 def _exec_source(name: str) -> str:
-    """The go2rtc `exec:` source for one camera: source its env, run tutk_client,
-    repackage to RTSP with ffmpeg. tutk_client stderr -> per-camera log."""
-    envf = f"/config/cameras/{name}.env"
-    logf = f"/config/tutk-{name}.log"
-    return ("exec:bash -c 'set -a; [ -f {e} ] && . {e}; "
-            "python3 /app/tutk_client.py 2>>{l} | {ff}'").format(e=envf, l=logf, ff=FFMPEG)
+    """go2rtc `exec:` source for one camera: source its env, set up an audio FIFO,
+    run tutk_client (H.264 video -> stdout, AAC audio -> FIFO), and let ffmpeg mux
+    BOTH into RTSP at {output}. The Owlet audio is AAC-LC (ADTS), so it's read with
+    `-f aac` and copied through with no re-encode. tutk_client stderr -> per-cam log.
+    If the camera has no audio, the FIFO just stays empty and video still flows."""
+    envf = "/config/cameras/%s.env" % name
+    logf = "/config/tutk-%s.log" % name
+    cmd = (
+        'set -a; [ -f %(e)s ] && . %(e)s; '
+        'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
+        'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
+        'export OWLET_AUDIO_FIFO="$F"; trap "rm -f $F" EXIT; '
+        'python3 /app/tutk_client.py 2>>%(l)s | '
+        'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
+        '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
+        '-use_wallclock_as_timestamps 1 -thread_queue_size 1024 -f aac -i "$F" '
+        '-map 0:v -map 1:a? -c:v copy -c:a copy -f rtsp -rtsp_transport tcp {output}'
+    ) % {"e": envf, "l": logf, "n": name}
+    return "exec:bash -c '" + cmd + "'"
 
 
 def render_go2rtc(cameras: list[dict]) -> str:
