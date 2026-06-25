@@ -292,37 +292,37 @@ def _write_env(path: str, env: dict[str, str]) -> None:
 
 
 def _exec_source(name: str) -> str:
-    """go2rtc `exec:` source for one camera: source its env, set up the audio +
-    talk FIFOs, run tutk_client (H.264 -> stdout, AAC -> FIFO) piped to ffmpeg,
-    which muxes both into RTSP at {output}.
+    """go2rtc `exec:` source for one camera: source its env, set up the talk FIFO,
+    run tutk_client (H.264 -> stdout) piped to ffmpeg, repackaged to RTSP.
 
-    The ffmpeg flags match the PROVEN single-cam (:latest) pipeline:
-      * `-fflags +genpts` — NOT `nobuffer`. `nobuffer` makes ffmpeg emit the RTSP
-        stream BEFORE it has parsed the H.264 SPS/PPS, so every consumer (Frigate,
-        browser, WebRTC) gets a stream with no codec info and decodes nothing
-        ("Invalid data found"). This was the regression that broke playback.
-      * generous analyzeduration/probesize (5s/5MB) so it locks onto the first
-        keyframe before declaring the stream.
-      * wallclock timestamps so bursty P2P frames don't drift/stutter.
-    Audio is optional (`-map 1:a?`) and re-encoded to AAC (ffmpeg's RTSP muxer
-    rejects the cam's header-less ADTS on copy)."""
+    VIDEO-ONLY — identical pipeline to the proven :latest build. The audio FIFO
+    (receive-from-camera) is intentionally omitted: opening a named-pipe as a
+    second ffmpeg input blocks ffmpeg until a writer appears, which delays (or
+    prevents) the RTSP stream from starting and causes consumers to receive
+    "Invalid data found when processing input".
+
+    OWLET_TALK_FIFO is still set up so the web-panel "Talk" / lullaby buttons
+    work (webapp writes PCM → FIFO → tutk_client sends to camera).
+
+    The ffmpeg flags match the PROVEN :latest pipeline:
+      * `-fflags +genpts` — NOT `nobuffer`. `nobuffer` emits RTSP before the
+        H.264 SPS/PPS is parsed, so every consumer decodes nothing.
+      * generous analyzeduration/probesize (5s/5MB) to lock onto the first IDR.
+      * wallclock timestamps so bursty P2P frames don't drift/stutter."""
     envf = "/config/cameras/%s.env" % name
     logf = "/config/tutk-%s.log" % name
     cmd = (
         'set -a; [ -f %(e)s ] && . %(e)s; '
         'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
-        'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
         'mkdir -p /config/vitals 2>/dev/null; '
-        'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
+        'export OWLET_TALK_FIFO="$T" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
-        'trap "rm -f $F $T" EXIT; '
+        'trap "rm -f $T" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
-        '-use_wallclock_as_timestamps 1 -thread_queue_size 512 -f aac -i "$F" '
-        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
-        '-f rtsp -rtsp_transport tcp {output}'
+        '-c:v copy -f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": slugify(name)}
     return "exec:bash -c '" + cmd + "'"
 
