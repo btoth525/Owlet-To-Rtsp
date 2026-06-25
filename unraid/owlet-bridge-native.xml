@@ -17,7 +17,7 @@ LIBRARIES: the proprietary TUTK .so libs are not shipped. Easiest path — in th
 
 NOTE on networking: this uses standard Bridge networking. Host ports are offset (1985/18554/18555) so they don't collide with Frigate's built-in go2rtc (1984/8554/8555). Keep it on Bridge (not a br0/macvlan custom network) so other containers like Frigate can reach it.</Overview>
   <Category>Tools: MediaApp:Video HomeAutomation:</Category>
-  <WebUI>http://[IP]:[PORT:8088]/</WebUI>
+  <WebUI>https://[IP]:[PORT:8088]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/owlet-bridge-native.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/icon.png</Icon>
   <ExtraParams>--restart unless-stopped</ExtraParams>

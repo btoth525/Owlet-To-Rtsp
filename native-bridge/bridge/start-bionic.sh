@@ -58,6 +58,19 @@ if python3 /app/render_streams.py; then
 fi
 echo "[owlet-bridge/bionic] go2rtc config : $GO2RTC_CFG"
 
+# Generate a self-signed TLS cert so the control panel runs on HTTPS.
+# Browsers block microphone access on plain HTTP (non-localhost). Self-signed is
+# fine for LAN use — you'll see a one-time "not secure" warning, click proceed.
+SSL_DIR=/config/ssl
+if [ ! -f "$SSL_DIR/cert.pem" ] || [ ! -f "$SSL_DIR/key.pem" ]; then
+  mkdir -p "$SSL_DIR"
+  if openssl req -x509 -newkey rsa:2048 \
+       -keyout "$SSL_DIR/key.pem" -out "$SSL_DIR/cert.pem" \
+       -days 3650 -nodes -subj "/CN=owlet-bridge" 2>/dev/null; then
+    echo "[owlet-bridge/bionic] TLS cert generated — control panel will use HTTPS"
+  fi
+fi
+
 python3 /app/webapp.py &
 
 # Keep every camera's stream warm 24/7 (one persistent internal viewer each). The
