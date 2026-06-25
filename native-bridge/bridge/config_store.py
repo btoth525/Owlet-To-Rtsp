@@ -254,39 +254,11 @@ def _write_env(path: str, env: dict[str, str]) -> None:
 
 
 def _exec_source(name: str) -> str:
-    """go2rtc `exec:` source for one camera: source its env, set up an audio FIFO,
-    run tutk_client (H.264 video -> stdout, AAC audio -> FIFO), and let ffmpeg mux
-    BOTH into RTSP at {output}. The Owlet audio is AAC-LC (ADTS), so it's read with
-    `-f aac` and copied through with no re-encode. tutk_client stderr -> per-cam log.
-    If the camera has no audio, the FIFO just stays empty and video still flows."""
-    envf = "/config/cameras/%s.env" % name
-    logf = "/config/tutk-%s.log" % name
-    cmd = (
-        'set -a; [ -f %(e)s ] && . %(e)s; '
-        'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
-        'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
-        'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
-        'mkdir -p /config/vitals 2>/dev/null; '
-        'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
-        'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
-        'trap "rm -f $F $T" EXIT; '
-        # Main stream is always a pure copy (lowest latency, no CPU) so your app
-        # gets sub-second WebRTC. The glass HUD lives on a SEPARATE on-demand
-        # stream (see _overlay_source) so it never touches this one.
-        'python3 /app/tutk_client.py 2>>%(l)s | '
-        # Low-latency ingest: nobuffer + low_delay so ffmpeg doesn't sit on frames,
-        # small analyze/probe so it locks on fast.
-        'ffmpeg -hide_banner -loglevel warning -fflags nobuffer+genpts -flags low_delay '
-        '-avioflags direct -max_delay 200000 '
-        '-use_wallclock_as_timestamps 1 -analyzeduration 1000000 -probesize 1000000 -f h264 -i - '
-        '-use_wallclock_as_timestamps 1 -thread_queue_size 512 -f aac -i "$F" '
-        # Re-encode AAC (don't copy): the camera's ADTS AAC has no global headers,
-        # which ffmpeg's RTSP muxer rejects ("AAC with no global headers"); the
-        # encoder emits proper headers. 16k mono is plenty for voice and ~free CPU.
-        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
-        '-muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
-    ) % {"e": envf, "l": logf, "n": name}
-    return "exec:bash -c '" + cmd + "'"
+    """go2rtc `exec:` source for one camera. Delegates to /app/run-cam.sh, which
+    sets up the FIFOs, runs tutk_client | ffmpeg (H.264 -> RTSP at {output}), and
+    — importantly — kills that whole pipeline when go2rtc stops/restarts the
+    source, so the camera's single P2P session never gets orphaned/duplicated."""
+    return "exec:/app/run-cam.sh %s {output}" % name
 
 
 def _overlay_source(name: str) -> str:

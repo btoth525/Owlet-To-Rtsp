@@ -25,10 +25,10 @@ USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
 COPY --from=dl /DejaVuSans.ttf /app/fonts/DejaVuSans.ttf
-COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh /app/
+COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh /app/
 COPY templates /app/templates
 COPY static /app/static
-RUN chmod +x /app/start-bionic.sh
+RUN chmod +x /app/start-bionic.sh /app/run-cam.sh
 
 ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
