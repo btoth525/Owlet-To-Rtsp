@@ -75,6 +75,23 @@ panel. Off by default.
 | `OWLET_REFRESH_KMS` | `1` | re‑fetch the camera key from Owlet on every (re)connect |
 | `OWLET_UI_USER` / `OWLET_UI_PASS` | *(unset)* | require Basic auth on the control panel |
 | `OWLET_KEEPALIVE` | `1` | hold one warm session per camera (leave on) |
+| `OWLET_VITALS_POLL` | `1` | continuously read sock vitals + cam sensors |
+| `OWLET_VITALS_INTERVAL` | `15` | seconds between sock vitals polls |
+| `OWLET_SENSORS` | `1` | publish cam room sensors (temp/humidity/noise/…) |
+| `OWLET_OVERLAY` | `0` | burn the glass HUD into the video (re‑encodes; CPU/latency cost) |
+| `OWLET_MQTT_HOST` | *(unset)* | enable Home Assistant MQTT discovery (broker IP) |
+| `OWLET_MQTT_PORT` | `1883` | MQTT broker port |
+| `OWLET_MQTT_USER` / `OWLET_MQTT_PASS` | *(unset)* | MQTT auth, if your broker needs it |
+
+### 🩺 Sock vitals + camera room sensors → UI, app & Home Assistant
+The bridge reads the **Smart Sock** vitals (heart rate, oxygen, skin temp, sleep
+state, battery…) from Owlet's cloud, and the **Owlet Cam's** room sensors
+(temperature, humidity, noise, brightness, motion, sound) straight off the TUTK
+stream — no cloud needed for the cam (see `native-bridge/docs/owlet-cam-sensors.md`).
+All of it is exposed at **`GET /api/vitals`** (°F by default; `?units=metric` for
+°C) for the web UI and your own app, and auto‑published to **Home Assistant** via
+MQTT discovery when `OWLET_MQTT_HOST` is set. Set `OWLET_OVERLAY=1` to also burn a
+glass HUD into the video (otherwise overlay client‑side from `/api/vitals`).
 
 Everything else is unchanged from `:latest`.
 

@@ -230,13 +230,28 @@ def _exec_source(name: str) -> str:
         'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
         'mkdir -p /config/vitals 2>/dev/null; '
+        'OV="/config/vitals/overlay-%(n)s.txt"; [ -f "$OV" ] || printf " " > "$OV"; '
         'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
         'trap "rm -f $F $T" EXIT; '
+        # Video output: default is a pure copy (lowest latency, no CPU). With
+        # OWLET_OVERLAY=1 we burn the glass HUD (overlay text file) into the feed
+        # — that requires re-encoding, so we use h264_nvenc if this ffmpeg has it,
+        # else libx264 -tune zerolatency to keep the added latency small.
+        'VENC="-c:v copy"; VF=""; '
+        'if [ "${OWLET_OVERLAY:-0}" = "1" ]; then '
+        '  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then '
+        '    VENC="-c:v h264_nvenc -preset p2 -tune ll -g 60"; '
+        '  else '
+        '    VENC="-c:v libx264 -preset veryfast -tune zerolatency -g 60 -pix_fmt yuv420p"; '
+        '  fi; '
+        '  VF="-filter:v drawtext=fontfile=/app/fonts/DejaVuSans.ttf:textfile=$OV:reload=1'
+        ':fontcolor=white:fontsize=h/26:box=1:boxcolor=black@0.40:boxborderw=18'
+        ':shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-tw)/2:y=h-th-(h/16)"; '
+        'fi; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
-        # Low-latency ingest: nobuffer + low_delay so ffmpeg doesn't sit on
-        # frames, small analyze/probe so it locks on fast. Video is copied (no
-        # re-encode) so glass-to-glass is basically the WebRTC jitter buffer.
+        # Low-latency ingest: nobuffer + low_delay so ffmpeg doesn't sit on frames,
+        # small analyze/probe so it locks on fast.
         'ffmpeg -hide_banner -loglevel warning -fflags nobuffer+genpts -flags low_delay '
         '-avioflags direct -max_delay 200000 '
         '-use_wallclock_as_timestamps 1 -analyzeduration 1000000 -probesize 1000000 -f h264 -i - '
@@ -244,7 +259,7 @@ def _exec_source(name: str) -> str:
         # Re-encode AAC (don't copy): the camera's ADTS AAC has no global headers,
         # which ffmpeg's RTSP muxer rejects ("AAC with no global headers"); the
         # encoder emits proper headers. 16k mono is plenty for voice and ~free CPU.
-        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
+        '-map 0:v -map 1:a? $VF $VENC -c:a aac -ar 16000 -ac 1 -b:a 64k '
         '-muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": name}
     return "exec:bash -c '" + cmd + "'"

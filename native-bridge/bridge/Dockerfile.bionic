@@ -9,7 +9,9 @@ ARG GO2RTC_VERSION=1.9.4
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
  && curl -fsSL -o /go2rtc \
       "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64" \
- && chmod +x /go2rtc
+ && chmod +x /go2rtc \
+ && curl -fsSL -o /DejaVuSans.ttf \
+      "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf"
 
 FROM termux/termux-docker:x86_64
 
@@ -23,6 +25,7 @@ RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir r
 USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
+COPY --from=dl /DejaVuSans.ttf /app/fonts/DejaVuSans.ttf
 COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh /app/
 COPY templates /app/templates
 COPY static /app/static
