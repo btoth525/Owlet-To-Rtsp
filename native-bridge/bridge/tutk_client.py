@@ -114,12 +114,21 @@ _FI_MIN_LEN = 28
 _CAM_SENSORS: dict = {}
 _CAM_SENSORS_LOCK = threading.Lock()
 _last_frame_sensor = [0.0]   # throttle frame-info writes
+# Some cams report temperature in tenths of °C. Default 1 (whole °C — confirmed
+# correct on the reference cam). Set OWLET_TEMP_SCALE=10 if your room temp reads
+# ~10x too high.
+try:
+    TEMP_SCALE = float(os.environ.get("OWLET_TEMP_SCALE") or "1") or 1.0
+except ValueError:
+    TEMP_SCALE = 1.0
 
 
 def _publish_cam_sensors(**fields) -> None:
     """Merge new readings into the sidecar JSON (atomic write)."""
     if not (CAM_SENSORS_PATH and SENSORS_ENABLED):
         return
+    if fields.get("temperature") is not None and TEMP_SCALE != 1.0:
+        fields["temperature"] = round(fields["temperature"] / TEMP_SCALE, 1)
     with _CAM_SENSORS_LOCK:
         _CAM_SENSORS.update({k: v for k, v in fields.items() if v is not None})
         _CAM_SENSORS["ts"] = time.time()
@@ -171,11 +180,13 @@ def _realtime_thread(av, av_idx, stop_evt):
     payload = b"\x00\x00\x00\x00"
     while not stop_evt.is_set():
         try:
-            av.avSendIOCtrl(av_idx, IOTYPE_GET_REALTIME_REQ, payload, len(payload))
+            with _AV_IO:
+                av.avSendIOCtrl(av_idx, IOTYPE_GET_REALTIME_REQ, payload, len(payload))
             # drain IOCtrl responses for up to ~1s looking for 961
             deadline = time.time() + 1.0
             while time.time() < deadline and not stop_evt.is_set():
-                rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 64, 500)
+                with _AV_IO:
+                    rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 64, 500)
                 if rc < 0:
                     break
                 if io_type.value == IOTYPE_GET_REALTIME_RESP and rc >= 16:
@@ -185,7 +196,9 @@ def _realtime_thread(av, av_idx, stop_evt):
                         humidity=int.from_bytes(b[4:8], "little", signed=True),
                         noise=int.from_bytes(b[8:12], "little", signed=True),
                         brightness=int.from_bytes(b[12:16], "little", signed=True),
-                        wifi_rssi=int.from_bytes(b[16:17], "little", signed=True),
+                        # only read rssi if the response actually carries byte 16
+                        wifi_rssi=(int.from_bytes(b[16:17], "little", signed=True)
+                                   if rc >= 17 else None),
                     )
                     break
         except Exception:  # noqa: BLE001
@@ -229,18 +242,37 @@ def _guess_audio(codec_id: int, flags: int) -> str:
 IOTYPE_SPEAKERSTART = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART") or "848")
 IOTYPE_SPEAKERSTOP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTOP") or "849")
 TALK_FIFO = os.environ.get("OWLET_TALK_FIFO", "")
+# Speaker frame format. Defaults match what the cam streams to us (AAC, 8kHz mono);
+# overridable, and auto-filled from the live audio probe when it reports.
+SPEAKER_CODEC_ID = int(os.environ.get("OWLET_SPEAKER_CODEC_ID") or "0x88", 0)
+SPEAKER_FLAGS = int(os.environ.get("OWLET_SPEAKER_FLAGS") or "0x02", 0)
+_PROBED_AUDIO: dict = {"codec_id": None, "flags": None}
+
+# Serializes every avSendIOCtrl / avRecvIOCtrl / avSendAudioData call. ctypes
+# releases the GIL, so the talk thread, the realtime-sensor poller and the
+# startup IOCTLs would otherwise run truly parallel inside the C SDK on one
+# av_idx — a known segfault/queue-corruption source. (Frame/audio RECV stay on
+# their own threads, unlocked.)
+_AV_IO = threading.Lock()
 
 
 def _talk_frameinfo(ts_ms: int) -> bytes:
-    # FRAMEINFO_t the camera expects for sent audio: codec_id=0x88 (AAC),
-    # flags=0x02 (8kHz mono 16-bit) — same format it streams to us; ts at off 12.
-    return (struct.pack("<HBBB", 0x88, 0x02, 0x00, 0x01) + b"\x00" * 7
-            + struct.pack("<I", ts_ms & 0xFFFFFFFF))
+    """16-byte FRAMEINFO_t for sent audio: codec_id@0, flags@2, timestamp@8
+    (the standard TUTK layout). codec/flags come from the live probe when known,
+    else the configured defaults."""
+    codec = _PROBED_AUDIO["codec_id"] if _PROBED_AUDIO["codec_id"] is not None else SPEAKER_CODEC_ID
+    flags = _PROBED_AUDIO["flags"] if _PROBED_AUDIO["flags"] is not None else SPEAKER_FLAGS
+    fi = bytearray(16)
+    struct.pack_into("<H", fi, 0, codec & 0xFFFF)        # codec_id
+    fi[2] = flags & 0xFF                                  # flags
+    struct.pack_into("<I", fi, 8, ts_ms & 0xFFFFFFFF)    # timestamp
+    return bytes(fi)
 
 
-def _send_adts(av, av_idx, buf: bytes, ts0: float) -> bytes:
+def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
     """Parse ADTS AAC frames from buf, send each as a raw AAC access unit via
-    avSendAudioData. Returns leftover bytes (an incomplete trailing frame)."""
+    avSendAudioData. Returns leftover bytes (an incomplete trailing frame).
+    stats=[sent, rejected] is updated so the talk loop can log delivery."""
     i, n = 0, len(buf)
     while n - i >= 7:
         if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:   # ADTS sync 0xFFFx
@@ -255,7 +287,12 @@ def _send_adts(av, av_idx, buf: bytes, ts0: float) -> bytes:
         hdr = 7 if (buf[i + 1] & 0x01) else 9   # protection_absent -> 7-byte header
         raw = buf[i + hdr:i + frame_len]
         fi = _talk_frameinfo(int((time.time() - ts0) * 1000))
-        av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
+        with _AV_IO:
+            rc = av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
+        if rc is not None and rc < 0:
+            stats[1] += 1
+        else:
+            stats[0] += 1
         i += frame_len
     return buf[i:]
 
@@ -274,10 +311,12 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     speaking = False
     last_audio = 0.0
     ts0 = time.time()
+    stats = [0, 0]   # [sent, rejected] avSendAudioData results
 
     def _spk(ioctl):
         sp = smsg_av_stream(AV_CHANNEL)
-        av.avSendIOCtrl(av_idx, ioctl, c_char_p(sp), len(sp))
+        with _AV_IO:
+            return av.avSendIOCtrl(av_idx, ioctl, c_char_p(sp), len(sp))
 
     try:
         while not stop_evt.is_set():
@@ -287,18 +326,22 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                 chunk = b""
             if chunk:
                 if not speaking:
-                    _spk(IOTYPE_SPEAKERSTART)
+                    rc = _spk(IOTYPE_SPEAKERSTART)
                     speaking = True
                     ts0 = time.time()
-                    log("[talk] speaker on")
-                buf = _send_adts(av, av_idx, buf + chunk, ts0)
+                    stats[0] = stats[1] = 0
+                    cid = _PROBED_AUDIO["codec_id"]
+                    log(f"[talk] speaker on (start ioctl={IOTYPE_SPEAKERSTART} rc={rc}, "
+                        f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x})")
+                buf = _send_adts(av, av_idx, buf + chunk, ts0, stats)
                 last_audio = time.monotonic()
             else:
                 if speaking and time.monotonic() - last_audio > 0.8:
                     _spk(IOTYPE_SPEAKERSTOP)
                     speaking = False
                     buf = b""
-                    log("[talk] speaker off (idle)")
+                    log(f"[talk] speaker off (idle) — sent {stats[0]} frames, "
+                        f"{stats[1]} rejected")
                 time.sleep(0.02)
     finally:
         if speaking:
@@ -342,6 +385,9 @@ def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                     info = ainfo.raw[:16]
                     codec_id = int.from_bytes(info[0:2], "little")
                     flags = info[2]
+                    # feed the real format into the talk/speaker path
+                    _PROBED_AUDIO["codec_id"] = codec_id
+                    _PROBED_AUDIO["flags"] = flags
                     log("[audio] ===== AUDIO DETECTED =====")
                     log(f"[audio] codec_id=0x{codec_id:04x} flags=0x{flags:02x} "
                         f"frame_size={rc}B info={info.hex()}")
@@ -682,19 +728,22 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 time.sleep(0.02)
         return 0
     finally:
-        # Stop the audio + talk threads first so they aren't mid-call on a channel
-        # we're closing (audio_stop is shared by both).
+        # Signal the worker threads, then avClientStop FIRST — that unblocks any
+        # thread parked inside avRecvAudioData/avRecvIOCtrl (which have their own
+        # timeouts but can sit longer than the join). Joining BEFORE the stop
+        # risked deInitialize() running while a worker was still in the C lib
+        # (use-after-free / segfault on reconnect).
         audio_stop.set()
-        if audio_thr is not None:
-            audio_thr.join(timeout=2)
-        if talk_thr is not None:
-            talk_thr.join(timeout=2)
-        if sensors_thr is not None:
-            sensors_thr.join(timeout=2)
+        if av_idx >= 0:
+            try:
+                av.avClientStop(av_idx)
+            except Exception:  # noqa: BLE001
+                pass
+        for thr in (audio_thr, talk_thr, sensors_thr):
+            if thr is not None:
+                thr.join(timeout=3)
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
-        if av_idx >= 0:
-            av.avClientStop(av_idx)
         if session >= 0:
             iotc.IOTC_Session_Close(session)
         av.avDeInitialize()

@@ -234,7 +234,9 @@ class OwletAPI:
             model = d.get("oem_model") or d.get("model")
             name = d.get("product_name") or d.get("device_type")
             self.log(f"\n      ── device dsn={dsn} model={model} name={name}")
-            self.log("      " + json.dumps(d, indent=2)[:2000])
+            # Don't dump the whole device object — it can carry tokens/secrets.
+            # The curated credential candidates below surface what's actually needed.
+            self.log("      fields: " + ", ".join(sorted(map(str, d.keys())))[:400])
             candidates += _hunt(d, f"device[{dsn}]")
             # Pull its properties too — cam params sometimes hide here.
             if dsn:

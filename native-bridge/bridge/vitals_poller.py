@@ -84,15 +84,23 @@ class _Mqtt:
         self.prefix = "homeassistant"
 
     def ensure(self, s: dict):
-        """Connect/disconnect/reconnect to match settings dict `s`."""
+        """Connect/disconnect/reconnect to match settings dict `s`. Retries each
+        poll while disconnected — `self._key` is only committed AFTER a successful
+        connect, so a broker that's down at boot gets retried (instead of being
+        stuck 'connected' to nothing forever)."""
         key = (s.get("enabled"), s.get("host"), s.get("port"),
                s.get("user"), s.get("password"), s.get("prefix"))
-        if key == self._key:
+        # already connected with these exact settings -> nothing to do
+        if key == self._key and self.c is not None:
             return
-        self._key = key
-        self._disconnect()
-        self._announced.clear()
+        # settings changed -> tear the old connection down
+        if key != self._key:
+            self._disconnect()
+            self._announced.clear()
+            self._key = key
         if not s.get("enabled") or not s.get("host"):
+            return
+        if self.c is not None:
             return
         try:
             import paho.mqtt.client as mqtt
@@ -101,7 +109,9 @@ class _Mqtt:
             return
         try:
             self.prefix = s.get("prefix") or "homeassistant"
-            c = mqtt.Client()
+            # paho 2.x requires a CallbackAPIVersion; 1.x has no such arg.
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1) \
+                if hasattr(mqtt, "CallbackAPIVersion") else mqtt.Client()
             if s.get("user"):
                 c.username_pw_set(s["user"], s.get("password") or "")
             c.will_set(f"{STATE_PREFIX}/bridge/status", "offline", retain=True)
@@ -111,7 +121,7 @@ class _Mqtt:
             self.c = c
             self.log(f"[vitals] MQTT connected to {s['host']}:{s.get('port')}")
         except Exception as e:  # noqa: BLE001
-            self.log(f"[vitals] MQTT connect failed: {e}")
+            self.log(f"[vitals] MQTT connect failed ({e}); will retry")
 
     def _disconnect(self):
         if self.c:
@@ -228,6 +238,7 @@ def main() -> None:
 
     mq = _Mqtt(log)
     api = None
+    fails = 0   # consecutive cloud failures -> backoff (don't hammer login)
     while True:
         devices: list[dict] = []
         cfg = cs.load_config()
@@ -237,31 +248,40 @@ def main() -> None:
                 if api is None:
                     api = OwletAPI(cfg["region"], cfg["email"], cfg["password"])
                 devices = OwletVitals(api).snapshot()
+                fails = 0
             except OwletError as e:
+                # auth/login failure -> drop the session and re-auth next time
                 log(f"[vitals] login error: {e}")
                 api = None
+                fails += 1
             except Exception as e:  # noqa: BLE001
+                # transient (network/JSON) -> KEEP the warm session, just back off.
+                # Re-authing on every blip risks Owlet rate-limiting the account.
                 log(f"[vitals] poll error: {e}")
-                api = None  # force re-auth (likely token expiry)
+                fails += 1
 
-        # merge live cam sensors from tutk_client sidecars
+        # merge live cam sensors from tutk_client sidecars (cloud-independent)
         cam_devs = _read_cam_sidecars()
         seen = {d.get("dsn") for d in devices}
         devices += [c for c in cam_devs if c["dsn"] not in seen]
 
+        # Always refresh the snapshot (even when empty) so /api/vitals can tell
+        # "no data yet" from "stale": it carries ts + an ok flag every loop.
+        try:
+            os.makedirs(cs.VITALS_DIR, exist_ok=True)
+            with open(SNAP + ".tmp", "w") as f:
+                json.dump({"ts": time.time(), "ok": bool(devices), "devices": devices}, f)
+            os.replace(SNAP + ".tmp", SNAP)
+        except OSError as e:
+            log(f"[vitals] snapshot write failed: {e}")
         if devices:
-            try:
-                os.makedirs(cs.VITALS_DIR, exist_ok=True)
-                with open(SNAP + ".tmp", "w") as f:
-                    json.dump({"ts": time.time(), "devices": devices}, f)
-                os.replace(SNAP + ".tmp", SNAP)
-            except OSError as e:
-                log(f"[vitals] snapshot write failed: {e}")
             _write_overlays(devices, log)
             for d in devices:
                 mq.publish_device(d)
 
-        time.sleep(POLL)
+        # exponential backoff on sustained cloud failure (cap ~5 min)
+        delay = POLL if fails == 0 else min(POLL * (2 ** min(fails, 5)), 300)
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

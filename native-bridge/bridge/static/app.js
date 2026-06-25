@@ -1,6 +1,9 @@
 const $ = (id) => document.getElementById(id);
+/* escape untrusted strings before putting them in innerHTML (XSS) */
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ACCOUNT_FIELDS = ["region","email","password","av_account","iotype_start",
-  "av_channel","region_code","license_key","webrtc_candidate"];
+  "av_channel","region_code","license_key","webrtc_candidate","ui_user","ui_pass"];
 
 /* ---------- feedback helpers ---------- */
 function toast(msg, kind="") {
@@ -56,15 +59,18 @@ async function saveAccount(btn) {
   return withLoading(btn, async () => {
     const body = collectAccount();
     if (body.password === "********") delete body.password;
+    if (body.ui_pass === "********") delete body.ui_pass;
     const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     toast(r.ok ? "Account saved." : "Couldn't save — config folder not writable (see log).", r.ok ? "good" : "bad");
+    if (r.ok) loadAccount();   // re-mask the saved password so it isn't re-POSTed
     refreshStatus();
   });
 }
 async function testLogin(btn) {
   return withLoading(btn, async () => {
     const body = {region:$("region").value, email:$("email").value, password:$("password").value};
-    if (!body.email || !body.password) { toast("Enter your Owlet email + password first.", "warn"); return; }
+    if (!body.email && !body.password) { toast("Enter your Owlet email + password first.", "warn"); return; }
+    if (!body.password) delete body.password;   // saved account: backend uses stored password
     await fetch("/api/diagnose", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     toast("Testing your Owlet login… watch the log.", "");
     pollFindings();
@@ -222,11 +228,11 @@ async function loadSounds(){
   box.innerHTML = "";
   for (const f of data.sounds){
     const row = document.createElement("div"); row.className = "snd-row";
-    row.innerHTML = `<button class="mini snd-play">▶</button><span class="snd-name">${f}</span>
+    row.innerHTML = `<button class="mini snd-play">▶</button><span class="snd-name">${esc(f)}</span>
       <span class="spacer"></span><button class="mini snd-del danger">🗑</button>`;
     row.querySelector(".snd-play").onclick = async () => {
       const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f})});
-      const j = await r.json(); toast(r.ok ? `▶ ${f} → ${talkCam()}` : (j.error||"couldn't play"), r.ok?"good":"bad");
+      const j = await r.json(); toast(r.ok ? `▶ ${f} → ${talkCam()}` : (j.message||j.error||"couldn't play"), r.ok?"good":"bad");
     };
     row.querySelector(".snd-del").onclick = async () => {
       if(!confirm(`Delete ${f}?`)) return;
@@ -265,7 +271,7 @@ async function startTalk(){
       const fd=new FormData(); fd.append("audio", blob, "talk.webm");
       const r=await fetch(`/api/talk/${talkCam()}`,{method:"POST",body:fd});
       const j=await r.json(); $("talk-status").textContent="";
-      toast(r.ok?"🔊 sent to the room":(j.error||"talk failed"), r.ok?"good":"bad");
+      toast(r.ok?"🔊 sent to the room":(j.message||j.error||"talk failed"), r.ok?"good":"bad");
     };
     _mediaRec.start();
     $("talk-status").textContent="🔴 recording… release to send";
@@ -387,7 +393,7 @@ async function refreshFindings() {
   box.innerHTML = "";
   for (const c of data.candidates) {
     const d = document.createElement("div"); d.className = "cand";
-    d.innerHTML = `<span class="f">${c.field}</span><span class="v">${c.value}</span>`;
+    d.innerHTML = `<span class="f">${esc(c.field)}</span><span class="v">${esc(c.value)}</span>`;
     box.appendChild(d);
   }
 }
@@ -446,7 +452,9 @@ async function loadVitals(){
   const devs=(data&&data.devices)||[];
   const withReadings=devs.filter(d=>d.sensors&&Object.values(d.sensors).some(v=>v!==null&&v!==undefined&&v!==""));
   if(!withReadings.length){ return; }  // keep the empty hint until we have data
-  const age = data.ts ? Math.round(Date.now()/1000 - data.ts) : null;
+  // age from the NEWEST device ts (cam sensors update independently of the sock)
+  const newest = Math.max(...withReadings.map(d=>d.ts||data.ts||0), data.ts||0);
+  const age = newest ? Math.max(0, Math.round(Date.now()/1000 - newest)) : null;
   wrap.innerHTML = withReadings.map(d=>{
     const keys=VITAL_ORDER.filter(k=>k in d.sensors);
     const chips=keys.map(k=>{
@@ -457,10 +465,13 @@ async function loadVitals(){
     }).join("");
     const badge=d.kind==="sock"?"🍼 Smart Sock":(d.kind==="cam"?"📷 Camera":"📦 Device");
     return `<div class="vcard glass"><div class="vhead">${badge}
-      <span class="vmodel">${d.model||d.dsn}</span></div>
+      <span class="vmodel">${esc(d.model||d.dsn||"")}</span></div>
       <div class="vgrid">${chips||"<span class='hint'>no recognized sensors</span>"}</div></div>`;
   }).join("");
-  if(age!==null){ wrap.innerHTML += `<div class="vts hint">updated ${age}s ago</div>`; }
+  if(age!==null){
+    const stale = age>180 ? " — ⚠️ stale (sock may be off-base or asleep)" : "";
+    wrap.innerHTML += `<div class="vts hint">updated ${age}s ago${stale}</div>`;
+  }
 }
 
 /* ---------- Home Assistant / MQTT ---------- */

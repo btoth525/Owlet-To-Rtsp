@@ -19,16 +19,19 @@ FROM termux/termux-docker:x86_64
 RUN /entrypoint.sh bash -c 'true'
 
 # 2) Install python + ffmpeg + pip deps as the Termux user (pkg/apt refuse root).
+#    - procps: provides ps/pkill/fuser used by run-cam.sh to reap the pipeline.
+#    - paho-mqtt<2.0: 2.x changed Client() to require a CallbackAPIVersion; pin to
+#      the 1.x API the code targets (code is also version-aware as a backstop).
 USER 1000
-RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir requests flask paho-mqtt'
+RUN bash -lc 'yes | pkg install -y python ffmpeg procps && pip install --no-cache-dir requests flask "paho-mqtt<2.0"'
 USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
 COPY --from=dl /DejaVuSans.ttf /app/fonts/DejaVuSans.ttf
-COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh /app/
+COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh owlet-entrypoint.sh /app/
 COPY templates /app/templates
 COPY static /app/static
-RUN chmod +x /app/start-bionic.sh /app/run-cam.sh
+RUN chmod +x /app/start-bionic.sh /app/run-cam.sh /app/owlet-entrypoint.sh
 
 ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
@@ -37,6 +40,9 @@ ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     ENV_PATH=/config/owlet.env
 
 VOLUME ["/config"]
-EXPOSE 8088 1984 8554 8555
-# ENTRYPOINT stays Termux's /entrypoint.sh (runs bootstrap, then our CMD).
-CMD ["/app/start-bionic.sh"]
+EXPOSE 8088 1984 8554 8555/tcp 8555/udp
+# Our entrypoint snapshots docker -e vars (before Termux's su wipes them) then
+# hands off to the real Termux entrypoint + start-bionic.sh. Invoked via an
+# explicit interpreter so it can't be defeated by a missing +x/shebang.
+ENTRYPOINT ["/bin/bash", "/app/owlet-entrypoint.sh"]
+CMD []

@@ -20,7 +20,7 @@ NOTE on networking: this uses standard Bridge networking. Host ports are offset 
   <WebUI>http://[IP]:[PORT:8088]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/owlet-bridge-native.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/btoth525/Owlet-To-Rtsp/main/unraid/icon.png</Icon>
-  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <ExtraParams>--restart unless-stopped --init</ExtraParams>
   <PostArgs/>
   <DonateText/>
   <DonateLink/>

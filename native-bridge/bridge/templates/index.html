@@ -64,6 +64,9 @@
             <input id="webrtc_candidate" placeholder="e.g. 192.168.1.204:18555 — your LAN IP : WebRTC host port">
             <span class="hint">Set this so a phone/app gets a reachable address for WebRTC media. Use this box (not the env var) — it persists across restarts. Leave blank for Frigate/LAN‑only.</span>
           </label>
+          <label>Panel username <input id="ui_user" autocomplete="off" placeholder="optional — lock this panel"></label>
+          <label>Panel password <input id="ui_pass" type="password" autocomplete="new-password" placeholder="optional"></label>
+          <span class="hint" style="grid-column:1/-1">Set both to require a login for this control panel (HTTP Basic auth). Leave blank to keep it open on your LAN.</span>
         </div>
       </details>
     </section>

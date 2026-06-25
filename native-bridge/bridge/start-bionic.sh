@@ -4,6 +4,14 @@
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
 export LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib
 
+# Restore the docker -e vars that owlet-entrypoint.sh snapshotted before Termux's
+# su wiped them. `export "$k=$v"` assigns literally (no eval) so values are safe.
+if [ -f /owlet-docker-env.raw ]; then
+  while IFS='=' read -r k v; do
+    case "$k" in OWLET_*|PUBLIC_*|GO2RTC_*) export "$k=$v" ;; esac
+  done < /owlet-docker-env.raw
+fi
+
 mkdir -p /config 2>/dev/null
 if [ ! -f /config/owlet.env ]; then
   if ! (echo "# owlet-bridge" > /config/owlet.env) 2>/dev/null; then
@@ -20,13 +28,19 @@ echo "[owlet-bridge/bionic] RTSP           : rtsp://<host>:8554/<camera>"
 
 # Cap the per-camera TUTK logs so they can't slowly fill appdata. tutk_client
 # appends to them via go2rtc's exec; keep the tail of any that grew past ~20 MB.
-for lf in /config/tutk.log /config/tutk-*.log; do
-  [ -f "$lf" ] || continue
-  if [ "$(stat -c%s "$lf" 2>/dev/null || echo 0)" -gt 20971520 ]; then
-    tail -c 2097152 "$lf" > "$lf.tmp" 2>/dev/null && mv "$lf.tmp" "$lf" 2>/dev/null
-    echo "[owlet-bridge/bionic] trimmed oversized $lf"
-  fi
-done
+# Run once at boot AND every hour in the background — a flapping camera can grow
+# its log fast, so a boot-only trim isn't enough.
+_trim_logs() {
+  for lf in /config/tutk.log /config/tutk-*.log; do
+    [ -f "$lf" ] || continue
+    if [ "$(stat -c%s "$lf" 2>/dev/null || echo 0)" -gt 20971520 ]; then
+      tail -c 2097152 "$lf" > "$lf.tmp" 2>/dev/null && mv "$lf.tmp" "$lf" 2>/dev/null
+      echo "[owlet-bridge/bionic] trimmed oversized $lf"
+    fi
+  done
+}
+_trim_logs
+( while sleep 3600; do _trim_logs; done ) &
 
 # Auto-provision the proprietary TUTK libs from a dropped Owlet APK (.apk/.apkm)
 # if they're not already in the mounted libs folder. No-op once they're present.

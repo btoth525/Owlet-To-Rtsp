@@ -15,19 +15,10 @@ webrtc:
 
 streams:
   owlet:
-    # Source the UI-saved creds, run the TUTK client (raw H.264 on stdout), and
-    # let ffmpeg repackage it into RTSP that go2rtc ingests at {output}. go2rtc
-    # supervises + restarts the whole pipeline.
-    #   - NO `-fflags nobuffer`: it makes ffmpeg emit the RTSP stream before it has
-    #     parsed the H.264 SPS, so consumers get a stream with no codec info and
-    #     decode nothing. Letting ffmpeg analyze the input first fixes that.
-    #   - generous analyzeduration/probesize so it reliably locks onto the first
-    #     keyframe before declaring the stream.
-    #   - `-use_wallclock_as_timestamps 1`: the raw H.264 has no timestamps, so
-    #     ffmpeg would otherwise assume a perfect 25fps; when P2P frames arrive
-    #     bursty the fake PTS drifts and the stream stutters/drops. Stamping each
-    #     frame with real arrival time keeps it smooth + stable.
-    #   - tutk_client's stderr ([tutk] connect/disconnect lines) -> /config/tutk.log
-    #     so camera drops are visible (`docker exec … tail -50 /config/tutk.log`);
-    #     go2rtc otherwise swallows exec stderr.
-    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py 2>>/config/tutk.log | ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
+    # Baked-in fallback (used only when /config isn't writable so the generated
+    # config can't be produced). Delegates to the same run-cam.sh as the normal
+    # path so it gets audio/talk/sensors AND the pipeline-reaping on restart that
+    # an inline `bash -c '… | …'` lacked. run-cam.sh falls back to
+    # /config/owlet.env when no per-camera env exists. #killsignal so go2rtc
+    # SIGTERMs (not SIGKILLs) and the reaping trap can run.
+    - exec:/app/run-cam.sh owlet {output}#killsignal=15&killtimeout=5

@@ -13,6 +13,8 @@ Runs on :8088. go2rtc serves the actual video + its own UI on :1984.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
 import socket
@@ -21,6 +23,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, Response, jsonify, render_template, request
@@ -63,14 +66,43 @@ def log(msg: str = "") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# optional auth
+# optional auth + CSRF
 # --------------------------------------------------------------------------- #
+# UI auth creds come from env (UI_USER/UI_PASS) or the saved config (ui_user/
+# ui_pass). Cache the config read for a few seconds so _auth isn't a file read
+# on every request.
+_AUTH = {"t": 0.0, "user": "", "pass": ""}
+
+
+def _ui_creds() -> tuple[str, str]:
+    if UI_USER and UI_PASS:
+        return UI_USER, UI_PASS
+    now = time.time()
+    if now - _AUTH["t"] > 5:
+        try:
+            cfg = cs.load_config()
+            _AUTH["user"] = cfg.get("ui_user") or ""
+            _AUTH["pass"] = cfg.get("ui_pass") or ""
+        except Exception:  # noqa: BLE001
+            pass
+        _AUTH["t"] = now
+    return _AUTH["user"], _AUTH["pass"]
+
+
 @app.before_request
 def _auth():
-    if not (UI_USER and UI_PASS):
+    # CSRF: block cross-site mutating requests. Browsers send Origin/Referer on
+    # POST/DELETE; native app clients and curl don't, so they're unaffected.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        src = request.headers.get("Origin") or request.headers.get("Referer")
+        if src and urlparse(src).netloc and urlparse(src).netloc != request.host:
+            return Response("cross-origin request blocked", 403)
+    user, pw = _ui_creds()
+    if not (user and pw):
         return None
     a = request.authorization
-    if a and a.username == UI_USER and a.password == UI_PASS:
+    if a and hmac.compare_digest(a.username or "", user) \
+            and hmac.compare_digest(a.password or "", pw):
         return None
     return Response("auth required", 401, {"WWW-Authenticate": 'Basic realm="owlet-bridge"'})
 
@@ -78,9 +110,9 @@ def _auth():
 # --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
-def save_config(cfg: dict) -> bool:
+def save_config(cfg: dict, regenerate: bool = True) -> bool:
     with _CFG_LOCK:
-        ok = cs.save_config(cfg)
+        ok = cs.save_config(cfg, regenerate=regenerate)
     if ok:
         return True
     log(f"!! CANNOT WRITE {cs.CONFIG_DIR}. The mounted config folder isn't writable "
@@ -99,6 +131,7 @@ def get_config():
     cfg = cs.load_config()
     out = {k: cfg.get(k, cs.ACCOUNT_DEFAULTS[k]) for k in cs.ACCOUNT_FIELDS}
     out["password"] = _mask_pw(out.get("password"))
+    out["ui_pass"] = _mask_pw(out.get("ui_pass"))
     return jsonify(out)
 
 
@@ -110,9 +143,12 @@ def post_config():
         if k not in incoming:
             continue
         val = incoming[k]
-        if k == "password" and val == "********":
+        if k in ("password", "ui_pass") and val == "********":
             continue
-        if (val is None or val == "") and (cfg.get(k) or "") != "":
+        # let webrtc_candidate / ui_* be explicitly cleared to "" from the UI;
+        # other defaulted fields keep their saved value when blank
+        if (val is None or val == "") and (cfg.get(k) or "") != "" \
+                and k not in ("webrtc_candidate", "ui_user", "ui_pass"):
             continue
         cfg[k] = val
     if not save_config(cfg):
@@ -174,7 +210,9 @@ def test_mqtt():
     except ImportError:
         return jsonify({"ok": False, "error": "paho-mqtt not installed in image"}), 500
     try:
-        c = mqtt.Client()
+        # paho 2.x requires a CallbackAPIVersion; 1.x has no such arg.
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1) \
+            if hasattr(mqtt, "CallbackAPIVersion") else mqtt.Client()
         if user:
             c.username_pw_set(user, pw or "")
         c.connect(host, port, 5)
@@ -187,12 +225,26 @@ def test_mqtt():
 # --------------------------------------------------------------------------- #
 # cameras
 # --------------------------------------------------------------------------- #
+_STREAMS_CACHE = {"t": 0.0, "data": {}}
+_STREAMS_LOCK = threading.Lock()
+
+
 def _go2rtc_streams() -> dict:
+    """Cached ~1s so /api/status + /api/cameras polling (every 5s, plus snapshots)
+    don't each make a blocking upstream call and stall the UI during a restart."""
+    now = time.time()
+    with _STREAMS_LOCK:
+        if now - _STREAMS_CACHE["t"] < 1.0:
+            return _STREAMS_CACHE["data"]
     try:
-        r = requests.get(f"{GO2RTC_API}/api/streams", timeout=4)
-        return r.json() if r.ok else {}
+        r = requests.get(f"{GO2RTC_API}/api/streams", timeout=2)
+        data = r.json() if r.ok else {}
     except Exception:  # noqa: BLE001
-        return {}
+        data = {}
+    with _STREAMS_LOCK:
+        _STREAMS_CACHE["t"] = time.time()
+        _STREAMS_CACHE["data"] = data
+    return data
 
 
 def _stream_status(streams: dict, name: str) -> dict:
@@ -306,14 +358,20 @@ def delete_camera(name):
     return jsonify({"ok": True})
 
 
+_BUSY_LOCK = threading.Lock()
+
+
 def _start_camera_diagnose(name: str):
-    if name in STATE["cam_busy"]:
-        return
+    # Atomic test-and-set so two near-simultaneous requests can't both spawn a
+    # login worker for the same camera (each would fight for the single session).
+    with _BUSY_LOCK:
+        if name in STATE["cam_busy"]:
+            return
+        STATE["cam_busy"].add(name)
     threading.Thread(target=_camera_diagnose_worker, args=(name,), daemon=True).start()
 
 
 def _camera_diagnose_worker(name: str):
-    STATE["cam_busy"].add(name)
     try:
         from owlet_api import OwletAPI
         cfg = cs.load_config()
@@ -672,8 +730,14 @@ def status():
 
 
 def _snapshot(name: str) -> Response:
+    if name.endswith("_overlay"):
+        base = name[:-len("_overlay")]
+    else:
+        base = name
+    if not _known_camera(base):
+        return Response(status=404)
     try:
-        r = requests.get(f"{GO2RTC_API}/api/frame.jpeg", params={"src": name}, timeout=8)
+        r = requests.get(f"{GO2RTC_API}/api/frame.jpeg", params={"src": name}, timeout=6)
         return Response(r.content, status=r.status_code,
                         mimetype=r.headers.get("Content-Type", "image/jpeg"))
     except Exception:  # noqa: BLE001
@@ -730,7 +794,25 @@ def upload_apk():
     return jsonify({"ok": ok, "message": msg})
 
 
-def restart_go2rtc():
+def _gen_hash():
+    try:
+        with open(cs.GEN_PATH, "rb") as fh:
+            return hashlib.sha1(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+# Hash of the go2rtc config we last (re)started for. Seeded with the boot config
+# so a save that doesn't change the streams (e.g. a UI-password edit) doesn't
+# needlessly bounce every camera's single P2P session.
+_LAST_GEN = {"h": _gen_hash()}
+
+
+def restart_go2rtc(force: bool = False):
+    h = _gen_hash()
+    if not force and h is not None and h == _LAST_GEN["h"]:
+        return  # generated config unchanged — leave the live sessions alone
+    _LAST_GEN["h"] = h
     try:
         requests.post(f"{GO2RTC_API}/api/restart", timeout=4)
         log("requested go2rtc restart.")
@@ -740,7 +822,7 @@ def restart_go2rtc():
 
 @app.post("/api/stream/restart")
 def restart_stream():
-    restart_go2rtc()
+    restart_go2rtc(force=True)
     return jsonify({"ok": True})
 
 
@@ -752,29 +834,44 @@ _PLAY_LOCK = threading.Lock()
 SOUND_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 
 
-def _ffmpeg_to_speaker(camera: str, input_args: list) -> tuple[bool, str]:
-    """Transcode an audio source to AAC-LC 8kHz mono ADTS and stream it (paced to
-    real time with -re) into the camera's talk FIFO; tutk_client plays it out the
-    speaker. Any previous playback for that camera is interrupted."""
+def _known_camera(camera: str) -> bool:
+    try:
+        return camera in cs.camera_names()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ffmpeg_to_speaker(camera: str, input_args: list):
+    """Transcode an audio source to AAC-LC mono ADTS and stream it (paced to real
+    time with -re) into the camera's talk FIFO; tutk_client plays it out the
+    speaker. Any previous playback for that camera is interrupted. Returns
+    (ok, message, proc). Rate is OWLET_TALK_RATE (default 8000, the cam's mic
+    rate) — set to match the camera's probed speaker rate if no audio plays."""
     fifo = cs.talk_fifo_path(camera)
     if not os.path.exists(fifo):
-        return False, "camera isn't streaming yet — start its stream first"
+        return False, "camera isn't streaming yet — start its stream first", None
+    rate = os.environ.get("OWLET_TALK_RATE", "8000")
     cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + input_args
-           + ["-ac", "1", "-ar", "8000", "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
+           + ["-ac", "1", "-ar", str(rate), "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
     with _PLAY_LOCK:
         old = PLAY_PROCS.get(camera)
         if old and old.poll() is None:
             try:
                 old.terminate()
+                old.wait(timeout=2)           # one writer at a time on the FIFO
             except Exception:  # noqa: BLE001
-                pass
+                try:
+                    old.kill()
+                except Exception:  # noqa: BLE001
+                    pass
         try:
-            PLAY_PROCS[camera] = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:  # noqa: BLE001
-            return False, f"ffmpeg failed: {e}"
-    return True, "playing"
+            return False, f"ffmpeg failed: {e}", None
+        PLAY_PROCS[camera] = proc
+    return True, "playing", proc
 
 
 @app.get("/api/sounds")
@@ -818,11 +915,13 @@ def delete_sound(fname):
 @app.post("/api/play/<camera>")
 def play_sound(camera):
     from werkzeug.utils import secure_filename
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
     fname = secure_filename((request.json or {}).get("file", ""))
     path = os.path.join(cs.SOUNDS_DIR, fname)
     if not fname or not os.path.exists(path):
         return jsonify({"ok": False, "error": "sound not found"}), 404
-    ok, msg = _ffmpeg_to_speaker(camera, ["-re", "-i", path])
+    ok, msg, _ = _ffmpeg_to_speaker(camera, ["-re", "-i", path])
     log(f"[play] {camera}: {fname} -> {msg}")
     return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
 
@@ -830,20 +929,22 @@ def play_sound(camera):
 @app.post("/api/talk/<camera>")
 def talk(camera):
     """Play a recorded mic clip out the camera speaker (hold-to-talk)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
     f = request.files.get("audio")
     if not f:
         return jsonify({"ok": False, "error": "no audio received"}), 400
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dat")
     f.save(tmp.name)
     tmp.close()
-    ok, msg = _ffmpeg_to_speaker(camera, ["-re", "-i", tmp.name])
+    ok, msg, proc = _ffmpeg_to_speaker(camera, ["-re", "-i", tmp.name])
 
-    # clean the temp once ffmpeg is done with it
+    # clean the temp once THIS clip's ffmpeg is done with it (bind to the exact
+    # proc — a later talk/play must not delete this clip out from under it).
     def _cleanup():
-        p = PLAY_PROCS.get(camera)
-        if p:
+        if proc:
             try:
-                p.wait(timeout=60)
+                proc.wait()
             except Exception:  # noqa: BLE001
                 pass
         try:
@@ -856,6 +957,8 @@ def talk(camera):
 
 @app.post("/api/talk/<camera>/stop")
 def talk_stop(camera):
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
     with _PLAY_LOCK:
         p = PLAY_PROCS.get(camera)
         if p and p.poll() is None:
