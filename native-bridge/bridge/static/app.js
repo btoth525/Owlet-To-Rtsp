@@ -416,7 +416,10 @@ const VITAL_META = {
   temperature:{icon:"🌡️",label:"Room temp",unit:"°C"},
   humidity:{icon:"💧",label:"Humidity",unit:"%"},
   noise:{icon:"🔊",label:"Noise",unit:" dB"},
-  brightness:{icon:"💡",label:"Brightness",unit:""},
+  brightness:{icon:"💡",label:"Brightness",unit:" lux"},
+  motion:{icon:"🏃",label:"Motion",unit:"",bool:1},
+  sound:{icon:"👂",label:"Sound",unit:"",bool:1},
+  wifi_rssi:{icon:"📶",label:"Cam WiFi",unit:" dBm"},
 };
 const VITAL_ORDER = Object.keys(VITAL_META);
 function fmtVital(k,v){

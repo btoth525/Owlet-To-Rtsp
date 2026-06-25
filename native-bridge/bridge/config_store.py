@@ -229,7 +229,10 @@ def _exec_source(name: str) -> str:
         'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
         'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
-        'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T"; trap "rm -f $F $T" EXIT; '
+        'mkdir -p /config/vitals 2>/dev/null; '
+        'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
+        'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
+        'trap "rm -f $F $T" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
@@ -286,3 +289,12 @@ def talk_fifo_path(name: str) -> str:
     exec creates (${TMPDIR:-/tmp}/owlet-talk-<name>)."""
     tmp = os.environ.get("TMPDIR") or "/tmp"
     return os.path.join(tmp, "owlet-talk-" + name)
+
+
+# Per-camera room-sensor sidecar (temp/humidity/noise/brightness/motion/sound),
+# written by tutk_client from the TUTK frame info + GetRealtimeData IOCTL.
+VITALS_DIR = os.path.join(CONFIG_DIR, "vitals")
+
+
+def cam_sensors_path(name: str) -> str:
+    return os.path.join(VITALS_DIR, "cam-" + name + ".json")

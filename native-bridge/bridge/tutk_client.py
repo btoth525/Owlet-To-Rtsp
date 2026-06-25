@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ctypes
 import fcntl
+import json
 import os
 import struct
 import sys
@@ -92,6 +93,105 @@ IOTC_ER_ALREADY_INITIALIZED = -3
 AV_ER_DATA_NOREADY = -20012
 AV_ER_REMOTE_TIMEOUT_DISCONNECT = -20015
 AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
+
+# --- camera environmental sensors (temp/humidity/noise/brightness) ------------
+# Reverse-engineered from the Owlet app (see docs/owlet-cam-sensors.md). Temp +
+# noise + motion + sound are embedded in the EXTENDED frame-info struct the cam
+# sends with every frame (offsets below). Humidity + brightness need a separate
+# GetRealtimeData IOCTL (req 960 -> resp 961). We publish everything to a JSON
+# sidecar the web UI / overlay reads. Disable with OWLET_SENSORS=0.
+CAM_SENSORS_PATH = os.environ.get("OWLET_CAM_SENSORS", "")
+SENSORS_ENABLED = os.environ.get("OWLET_SENSORS", "1") != "0"
+IOTYPE_GET_REALTIME_REQ = 960   # 0x3C0
+IOTYPE_GET_REALTIME_RESP = 961  # 0x3C1
+CAM_SENSOR_INTERVAL = int(os.environ.get("OWLET_SENSOR_INTERVAL") or "10")
+# frame-info field offsets (little-endian) in the Owlet extended FRAMEINFO
+_FI_FLAGS = 2
+_FI_TEMP = 16
+_FI_AUDIO_DB = 24
+_FI_MIN_LEN = 28
+
+_CAM_SENSORS: dict = {}
+_CAM_SENSORS_LOCK = threading.Lock()
+_last_frame_sensor = [0.0]   # throttle frame-info writes
+
+
+def _publish_cam_sensors(**fields) -> None:
+    """Merge new readings into the sidecar JSON (atomic write)."""
+    if not (CAM_SENSORS_PATH and SENSORS_ENABLED):
+        return
+    with _CAM_SENSORS_LOCK:
+        _CAM_SENSORS.update({k: v for k, v in fields.items() if v is not None})
+        _CAM_SENSORS["ts"] = time.time()
+        try:
+            tmp = CAM_SENSORS_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(_CAM_SENSORS, f)
+            os.replace(tmp, CAM_SENSORS_PATH)
+        except OSError:
+            pass
+
+
+def _parse_frame_sensors(info: bytes, n: int) -> None:
+    """Pull temp/noise/motion/sound from the extended frame-info struct.
+
+    Throttled to CAM_SENSOR_INTERVAL so we're not writing the sidecar at 25fps.
+    """
+    if not (CAM_SENSORS_PATH and SENSORS_ENABLED) or n < _FI_MIN_LEN:
+        return
+    now = time.time()
+    if now - _last_frame_sensor[0] < CAM_SENSOR_INTERVAL:
+        return
+    _last_frame_sensor[0] = now
+    flags = info[_FI_FLAGS]
+    temp = int.from_bytes(info[_FI_TEMP:_FI_TEMP + 4], "little", signed=True)
+    noise = int.from_bytes(info[_FI_AUDIO_DB:_FI_AUDIO_DB + 4], "little", signed=True)
+    _publish_cam_sensors(
+        temperature=temp,
+        noise=noise,
+        motion=1 if (flags & 0x02) else 0,
+        sound=1 if (flags & 0x08) else 0,
+    )
+
+
+def _realtime_thread(av, av_idx, stop_evt):
+    """Poll the cam's GetRealtimeData IOCTL for humidity + brightness.
+
+    Sends req 960 (4 zero bytes), reads IOCtrl frames until resp 961, parses the
+    little-endian struct {temp i32@0, humidity i32@4, noise i32@8, brightness
+    i32@12, wifi_rssi i8@16}. Fully guarded — any error just skips this round so
+    it can never disturb the video pipeline.
+    """
+    if not (CAM_SENSORS_PATH and SENSORS_ENABLED):
+        return
+    if not hasattr(av, "avRecvIOCtrl"):
+        return
+    io_type = c_int(0)
+    rbuf = create_string_buffer(64)
+    payload = b"\x00\x00\x00\x00"
+    while not stop_evt.is_set():
+        try:
+            av.avSendIOCtrl(av_idx, IOTYPE_GET_REALTIME_REQ, payload, len(payload))
+            # drain IOCtrl responses for up to ~1s looking for 961
+            deadline = time.time() + 1.0
+            while time.time() < deadline and not stop_evt.is_set():
+                rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 64, 500)
+                if rc < 0:
+                    break
+                if io_type.value == IOTYPE_GET_REALTIME_RESP and rc >= 16:
+                    b = rbuf.raw
+                    _publish_cam_sensors(
+                        temperature=int.from_bytes(b[0:4], "little", signed=True),
+                        humidity=int.from_bytes(b[4:8], "little", signed=True),
+                        noise=int.from_bytes(b[8:12], "little", signed=True),
+                        brightness=int.from_bytes(b[12:16], "little", signed=True),
+                        wifi_rssi=int.from_bytes(b[16:17], "little", signed=True),
+                    )
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        stop_evt.wait(CAM_SENSOR_INTERVAL)
+
 
 # --- audio probe (step 1: capture + report the camera's audio format) ---------
 # The Owlet cam carries audio on the same Kalay AV channel as video, but its codec
@@ -430,6 +530,9 @@ def stream_once(uid: str, sec_mode: int) -> int:
     _set_sig(av, "avClientStartEx", c_int,
              [POINTER(St_AVClientStartInConfig), POINTER(St_AVClientStartOutConfig)])
     _set_sig(av, "avSendIOCtrl", c_int, [c_int, c_uint, c_char_p, c_int])
+    if hasattr(av, "avRecvIOCtrl"):
+        _set_sig(av, "avRecvIOCtrl", c_int,
+                 [c_int, POINTER(c_int), c_char_p, c_int, c_int])
     _set_sig(av, "avClientStop", c_int, [c_int])
     _set_sig(av, "avRecvFrameData2", c_int,
              [c_int, c_char_p, c_int, POINTER(c_int), POINTER(c_int),
@@ -468,6 +571,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
     audio_stop = threading.Event()
     audio_thr = None
     talk_thr = None
+    sensors_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -527,6 +631,17 @@ def stream_once(uid: str, sec_mode: int) -> int:
             except Exception as e:  # noqa: BLE001
                 log(f"[talk] start failed: {e}")
 
+        # Room sensors: poll the GetRealtimeData IOCTL for humidity + brightness
+        # (temp/noise/motion/sound already ride the frame info).
+        if CAM_SENSORS_PATH and SENSORS_ENABLED:
+            try:
+                sensors_thr = threading.Thread(
+                    target=_realtime_thread, args=(av, av_idx, audio_stop), daemon=True)
+                sensors_thr.start()
+                log(f"[sensors] publishing room sensors to {CAM_SENSORS_PATH}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[sensors] start failed: {e}")
+
         buf = create_string_buffer(FRAME_BUF)
         finfo = create_string_buffer(FINFO_BUF)
         actual = c_int(0); expected = c_int(0); finfo_len = c_int(0); frmno = c_int(0)
@@ -544,6 +659,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
                 last_data = time.time()
+                # temp/noise/motion/sound ride in the extended frame-info struct
+                _parse_frame_sensors(finfo.raw, finfo_len.value)
                 if time.time() - last_log > 15:
                     log(f"{frames} frames forwarded"); last_log = time.time()
             elif rc == AV_ER_DATA_NOREADY:
@@ -572,6 +689,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
             audio_thr.join(timeout=2)
         if talk_thr is not None:
             talk_thr.join(timeout=2)
+        if sensors_thr is not None:
+            sensors_thr.join(timeout=2)
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
         if av_idx >= 0:

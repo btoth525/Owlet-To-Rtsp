@@ -403,16 +403,49 @@ def vitals_discover():
     return jsonify({"ok": True})
 
 
+CAM_SENSOR_KEYS = ("temperature", "humidity", "noise", "brightness",
+                   "motion", "sound", "wifi_rssi")
+
+
+def _cam_sensor_devices() -> list[dict]:
+    """Live room sensors per camera, written by tutk_client from the TUTK
+    stream (temp/noise/motion/sound from frame info; humidity/brightness from
+    the GetRealtimeData IOCTL)."""
+    import json as _json
+    out = []
+    cfg = cs.load_config()
+    for name in cs.camera_names(cfg):
+        try:
+            with open(cs.cam_sensors_path(name)) as f:
+                data = _json.load(f)
+        except (FileNotFoundError, ValueError):
+            continue
+        sensors = {k: data[k] for k in CAM_SENSOR_KEYS if k in data}
+        if not sensors:
+            continue
+        out.append({"dsn": name, "name": name, "model": "Owlet Cam",
+                    "kind": "cam", "sensors": sensors, "ts": data.get("ts")})
+    return out
+
+
 @app.get("/api/vitals")
 def vitals_latest():
+    import json as _json
+    payload = {"ts": None, "devices": []}
     try:
-        import json as _json
         with open(VITALS_CACHE) as f:
-            return jsonify(_json.load(f))
-    except FileNotFoundError:
-        return jsonify({"ts": None, "devices": []})
+            payload = _json.load(f)
+    except (FileNotFoundError, ValueError):
+        pass
     except Exception as e:  # noqa: BLE001
-        return jsonify({"ts": None, "devices": [], "error": str(e)})
+        payload = {"ts": None, "devices": [], "error": str(e)}
+    # Merge live cam room-sensors (these update continuously off the stream).
+    cams = _cam_sensor_devices()
+    if cams:
+        existing = {d.get("dsn") for d in payload.get("devices", [])}
+        payload.setdefault("devices", [])
+        payload["devices"] += [c for c in cams if c["dsn"] not in existing]
+    return jsonify(payload)
 
 
 @app.get("/api/logs")
