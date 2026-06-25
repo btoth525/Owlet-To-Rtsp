@@ -61,13 +61,17 @@ echo "[owlet-bridge/bionic] go2rtc config : $GO2RTC_CFG"
 # Generate a self-signed TLS cert so the control panel runs on HTTPS.
 # Browsers block microphone access on plain HTTP (non-localhost). Self-signed is
 # fine for LAN use — you'll see a one-time "not secure" warning, click proceed.
+# openssl binary is a dep of python/ffmpeg in Termux, so it's always present.
 SSL_DIR=/config/ssl
 if [ ! -f "$SSL_DIR/cert.pem" ] || [ ! -f "$SSL_DIR/key.pem" ]; then
   mkdir -p "$SSL_DIR"
-  if openssl req -x509 -newkey rsa:2048 \
+  OPENSSL_BIN=$(command -v openssl 2>/dev/null || echo "")
+  if [ -n "$OPENSSL_BIN" ] && "$OPENSSL_BIN" req -x509 -newkey rsa:2048 \
        -keyout "$SSL_DIR/key.pem" -out "$SSL_DIR/cert.pem" \
        -days 3650 -nodes -subj "/CN=owlet-bridge" 2>/dev/null; then
     echo "[owlet-bridge/bionic] TLS cert generated — control panel will use HTTPS"
+  else
+    echo "[owlet-bridge/bionic] openssl not found — control panel will use HTTP (mic needs Chrome flag)"
   fi
 fi
 
