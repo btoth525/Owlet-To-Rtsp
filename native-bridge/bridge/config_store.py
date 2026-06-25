@@ -41,8 +41,8 @@ def _atomic_write(path: str, text: str) -> None:
 
 def _sh_squote(v) -> str:
     """Single-quote a value for a sourced shell env file so credential/UI values
-    containing $(...), backticks, ;, newlines, etc. can never execute when
-    run-cam.sh does `. <file>`."""
+    containing $(...), backticks, ;, newlines, etc. can never execute when the
+    go2rtc exec sources it with `. <file>`."""
     s = str(v).replace("\n", " ").replace("\r", " ")
     return "'" + s.replace("'", "'\\''") + "'"
 
@@ -292,17 +292,39 @@ def _write_env(path: str, env: dict[str, str]) -> None:
 
 
 def _exec_source(name: str) -> str:
-    """go2rtc `exec:` source for one camera. Delegates to /app/run-cam.sh, which
-    sets up the FIFOs, runs tutk_client | ffmpeg (H.264 -> RTSP at {output}), and
-    — importantly — kills that whole pipeline when go2rtc stops/restarts the
-    source, so the camera's single P2P session never gets orphaned/duplicated.
+    """go2rtc `exec:` source for one camera: source its env, set up the audio +
+    talk FIFOs, run tutk_client (H.264 -> stdout, AAC -> FIFO) piped to ffmpeg,
+    which muxes both into RTSP at {output}.
 
-    The `#killsignal=15&killtimeout=5` fragment tells go2rtc to SIGTERM (not its
-    default SIGKILL) and wait 5s, so run-cam.sh's trap can reap the pipeline. The
-    fragment is consumed by go2rtc's closer (strings.Cut on '#') before {output}
-    substitution, so it never leaks into the command line."""
-    nm = slugify(name)
-    return "exec:/app/run-cam.sh %s {output}#killsignal=15&killtimeout=5" % nm
+    The ffmpeg flags match the PROVEN single-cam (:latest) pipeline:
+      * `-fflags +genpts` — NOT `nobuffer`. `nobuffer` makes ffmpeg emit the RTSP
+        stream BEFORE it has parsed the H.264 SPS/PPS, so every consumer (Frigate,
+        browser, WebRTC) gets a stream with no codec info and decodes nothing
+        ("Invalid data found"). This was the regression that broke playback.
+      * generous analyzeduration/probesize (5s/5MB) so it locks onto the first
+        keyframe before declaring the stream.
+      * wallclock timestamps so bursty P2P frames don't drift/stutter.
+    Audio is optional (`-map 1:a?`) and re-encoded to AAC (ffmpeg's RTSP muxer
+    rejects the cam's header-less ADTS on copy)."""
+    envf = "/config/cameras/%s.env" % name
+    logf = "/config/tutk-%s.log" % name
+    cmd = (
+        'set -a; [ -f %(e)s ] && . %(e)s; '
+        'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
+        'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
+        'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
+        'mkdir -p /config/vitals 2>/dev/null; '
+        'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
+        'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
+        'trap "rm -f $F $T" EXIT; '
+        'python3 /app/tutk_client.py 2>>%(l)s | '
+        'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
+        '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
+        '-use_wallclock_as_timestamps 1 -thread_queue_size 512 -f aac -i "$F" '
+        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
+        '-f rtsp -rtsp_transport tcp {output}'
+    ) % {"e": envf, "l": logf, "n": slugify(name)}
+    return "exec:bash -c '" + cmd + "'"
 
 
 def _overlay_source(name: str) -> str:

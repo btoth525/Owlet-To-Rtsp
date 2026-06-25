@@ -19,7 +19,7 @@ FROM termux/termux-docker:x86_64
 RUN /entrypoint.sh bash -c 'true'
 
 # 2) Install python + ffmpeg + pip deps as the Termux user (pkg/apt refuse root).
-#    - procps: provides ps/pkill/fuser used by run-cam.sh to reap the pipeline.
+#    - procps: ps/pkill/fuser for debugging the stream pipeline.
 #    - paho-mqtt<2.0: 2.x changed Client() to require a CallbackAPIVersion; pin to
 #      the 1.x API the code targets (code is also version-aware as a backstop).
 USER 1000
@@ -28,10 +28,10 @@ USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
 COPY --from=dl /DejaVuSans.ttf /app/fonts/DejaVuSans.ttf
-COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh /app/
+COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh /app/
 COPY templates /app/templates
 COPY static /app/static
-RUN chmod +x /app/start-bionic.sh /app/run-cam.sh
+RUN chmod +x /app/start-bionic.sh
 
 ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \

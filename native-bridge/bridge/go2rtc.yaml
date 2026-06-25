@@ -15,10 +15,8 @@ webrtc:
 
 streams:
   owlet:
-    # Baked-in fallback (used only when /config isn't writable so the generated
-    # config can't be produced). Delegates to the same run-cam.sh as the normal
-    # path so it gets audio/talk/sensors AND the pipeline-reaping on restart that
-    # an inline `bash -c '… | …'` lacked. run-cam.sh falls back to
-    # /config/owlet.env when no per-camera env exists. #killsignal so go2rtc
-    # SIGTERMs (not SIGKILLs) and the reaping trap can run.
-    - exec:/app/run-cam.sh owlet {output}#killsignal=15&killtimeout=5
+    # Baked-in single-cam fallback (used only when /config isn't writable, so the
+    # generated config can't be produced). Proven :latest pipeline — note the
+    # explicit absence of `-fflags nobuffer` (it would emit RTSP before the H.264
+    # SPS is parsed, so consumers decode nothing).
+    - exec:bash -c 'set -a; [ -f /config/owlet.env ] && . /config/owlet.env; python3 /app/tutk_client.py 2>>/config/tutk.log | ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c copy -f rtsp -rtsp_transport tcp {output}'
