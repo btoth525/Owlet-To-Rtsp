@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const ACCOUNT_FIELDS = ["region","email","password","av_account","iotype_start",
-  "av_channel","region_code","license_key"];
+  "av_channel","region_code","license_key","webrtc_candidate"];
 
 /* ---------- feedback helpers ---------- */
 function toast(msg, kind="") {

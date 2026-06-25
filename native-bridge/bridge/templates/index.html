@@ -60,6 +60,10 @@
           <label>AV channel <input id="av_channel" value="0"></label>
           <label>Region code <input id="region_code" value="3"></label>
           <label style="grid-column:1/-1">License key <input id="license_key" placeholder="baked in — leave as is"></label>
+          <label style="grid-column:1/-1">WebRTC candidate (for phone/app sub‑second video)
+            <input id="webrtc_candidate" placeholder="e.g. 192.168.1.204:18555 — your LAN IP : WebRTC host port">
+            <span class="hint">Set this so a phone/app gets a reachable address for WebRTC media. Use this box (not the env var) — it persists across restarts. Leave blank for Frigate/LAN‑only.</span>
+          </label>
         </div>
       </details>
     </section>
