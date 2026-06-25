@@ -4,14 +4,6 @@
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
 export LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib
 
-# Restore the docker -e vars that owlet-entrypoint.sh snapshotted before Termux's
-# su wiped them. `export "$k=$v"` assigns literally (no eval) so values are safe.
-if [ -f /owlet-docker-env.raw ]; then
-  while IFS='=' read -r k v; do
-    case "$k" in OWLET_*|PUBLIC_*|GO2RTC_*) export "$k=$v" ;; esac
-  done < /owlet-docker-env.raw
-fi
-
 mkdir -p /config 2>/dev/null
 if [ ! -f /config/owlet.env ]; then
   if ! (echo "# owlet-bridge" > /config/owlet.env) 2>/dev/null; then

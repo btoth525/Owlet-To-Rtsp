@@ -28,10 +28,10 @@ USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
 COPY --from=dl /DejaVuSans.ttf /app/fonts/DejaVuSans.ttf
-COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh owlet-entrypoint.sh /app/
+COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh run-cam.sh /app/
 COPY templates /app/templates
 COPY static /app/static
-RUN chmod +x /app/start-bionic.sh /app/run-cam.sh /app/owlet-entrypoint.sh
+RUN chmod +x /app/start-bionic.sh /app/run-cam.sh
 
 ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
@@ -41,8 +41,10 @@ ENV TUTK_LIB_DIR=/app/libs/x86_64 \
 
 VOLUME ["/config"]
 EXPOSE 8088 1984 8554 8555/tcp 8555/udp
-# Our entrypoint snapshots docker -e vars (before Termux's su wipes them) then
-# hands off to the real Termux entrypoint + start-bionic.sh. Invoked via an
-# explicit interpreter so it can't be defeated by a missing +x/shebang.
-ENTRYPOINT ["/bin/bash", "/app/owlet-entrypoint.sh"]
-CMD []
+# Keep the base image's Termux /entrypoint.sh (runs the bootstrap, sets up the
+# Termux userspace, then execs our CMD). Do NOT override ENTRYPOINT with an
+# explicit interpreter — this base has no /bin/bash (bash lives under
+# /data/data/com.termux/...), so e.g. `ENTRYPOINT ["/bin/bash", …]` crash-loops
+# the container. Configure via the UI/config (env-strip-proof) — docker -e vars
+# don't survive the Termux su on this base.
+CMD ["/app/start-bionic.sh"]
