@@ -848,11 +848,27 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
     (ok, message, proc). Rate is OWLET_TALK_RATE (default 8000, the cam's mic
     rate) — set to match the camera's probed speaker rate if no audio plays."""
     fifo = cs.talk_fifo_path(camera)
+    log(f"[talk] FIFO={fifo} exists={os.path.exists(fifo)}")
     if not os.path.exists(fifo):
         return False, "camera isn't streaming yet — start its stream first", None
+    # Quick check: can we open the FIFO for writing without blocking?
+    # If tutk_client's _talk_thread is NOT running (or FIFO has no reader),
+    # O_WRONLY|O_NONBLOCK fails with ENXIO. Log this clearly.
+    import errno as _errno
+    try:
+        _test_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(_test_fd)
+        log(f"[talk] FIFO has a reader (tutk_client talk thread is alive)")
+    except OSError as _e:
+        if _e.errno == _errno.ENXIO:
+            log(f"[talk] FIFO has NO reader — tutk_client talk thread may not be running "
+                f"(check the tutk log for '[talk] FIFO open' or avSendAudioData errors)")
+        else:
+            log(f"[talk] FIFO open check: {_e}")
     rate = os.environ.get("OWLET_TALK_RATE", "8000")
-    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + input_args
+    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "warning"] + input_args
            + ["-ac", "1", "-ar", str(rate), "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
+    log(f"[talk] cmd: {' '.join(cmd)}")
     with _PLAY_LOCK:
         old = PLAY_PROCS.get(camera)
         if old and old.poll() is None:
@@ -867,10 +883,24 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         except Exception as e:  # noqa: BLE001
             return False, f"ffmpeg failed: {e}", None
         PLAY_PROCS[camera] = proc
+
+    # Stream ffmpeg's stderr into the webapp log so errors are visible.
+    def _drain_ffmpeg_stderr():
+        try:
+            for raw in proc.stderr:
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    log(f"[ffmpeg/talk] {line}")
+        except Exception:  # noqa: BLE001
+            pass
+        rc = proc.wait()
+        log(f"[talk] ffmpeg exited rc={rc}")
+    threading.Thread(target=_drain_ffmpeg_stderr, daemon=True).start()
+
     return True, "playing", proc
 
 
@@ -967,6 +997,29 @@ def talk_stop(camera):
             except Exception:  # noqa: BLE001
                 pass
     return jsonify({"ok": True})
+
+
+@app.get("/api/talk/<camera>/fifo_status")
+def talk_fifo_status(camera):
+    """Diagnostic: report whether tutk_client's talk FIFO is open for reading."""
+    import errno as _errno
+    fifo = cs.talk_fifo_path(camera)
+    exists = os.path.exists(fifo)
+    if not exists:
+        return jsonify({"fifo": fifo, "exists": False,
+                        "reader": False, "error": "FIFO not found (camera not streaming?)"}), 404
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        return jsonify({"fifo": fifo, "exists": True, "reader": True,
+                        "message": "FIFO has a reader — tutk_client talk thread is alive"})
+    except OSError as e:
+        if e.errno == _errno.ENXIO:
+            return jsonify({"fifo": fifo, "exists": True, "reader": False,
+                            "error": "FIFO has NO reader — tutk_client talk thread not running "
+                                     "(check log for avSendAudioData or FIFO open errors)"}), 500
+        return jsonify({"fifo": fifo, "exists": True, "reader": None,
+                        "error": str(e)}), 500
 
 
 @app.get("/")

@@ -303,7 +303,12 @@ def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
 
 def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     """Play whatever AAC arrives on the talk FIFO out the camera's speaker."""
-    if not TALK_FIFO or not hasattr(av, "avSendAudioData"):
+    if not TALK_FIFO:
+        log("[talk] OWLET_TALK_FIFO not set — talk/speaker disabled")
+        return
+    if not hasattr(av, "avSendAudioData"):
+        log("[talk] avSendAudioData not found in TUTK lib — talk/speaker disabled "
+            "(older lib build; two-way audio requires a lib with avSendAudioData)")
         return
     try:
         # O_RDWR so the FIFO never EOFs / blocks when no writer is connected.
@@ -311,11 +316,13 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     except OSError as e:  # noqa: BLE001
         log(f"[talk] cannot open {TALK_FIFO}: {e}")
         return
+    log(f"[talk] FIFO open (fd={fd}) — ready to receive audio on {TALK_FIFO}")
     buf = b""
     speaking = False
     last_audio = 0.0
     ts0 = time.time()
     stats = [0, 0]   # [sent, rejected] avSendAudioData results
+    last_alive = time.monotonic()
 
     def _spk(ioctl):
         sp = smsg_av_stream(AV_CHANNEL)
@@ -324,11 +331,16 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
 
     try:
         while not stop_evt.is_set():
+            # Periodic heartbeat so we can confirm the thread is alive in logs.
+            if time.monotonic() - last_alive > 30:
+                log(f"[talk] alive, listening on FIFO (speaking={speaking})")
+                last_alive = time.monotonic()
             try:
                 chunk = os.read(fd, 8192)
             except BlockingIOError:
                 chunk = b""
             if chunk:
+                log(f"[talk] read {len(chunk)} bytes from FIFO")
                 if not speaking:
                     if SKIP_SPEAKERSTART:
                         rc = 0
@@ -683,12 +695,15 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 log(f"[audio] probe start failed: {e}")
 
         # Talk / sound-playback: play AAC arriving on the talk FIFO out the speaker.
+        has_send = hasattr(av, "avSendAudioData")
+        log(f"[talk] avSendAudioData={'found' if has_send else 'NOT FOUND in lib'} "
+            f"TALK_FIFO={TALK_FIFO!r}")
         if TALK_FIFO:
             try:
                 talk_thr = threading.Thread(
                     target=_talk_thread, args=(av, av_idx, audio_stop), daemon=True)
                 talk_thr.start()
-                log(f"[talk] listening for audio on {TALK_FIFO}")
+                log(f"[talk] thread started — listening on {TALK_FIFO}")
             except Exception as e:  # noqa: BLE001
                 log(f"[talk] start failed: {e}")
 
