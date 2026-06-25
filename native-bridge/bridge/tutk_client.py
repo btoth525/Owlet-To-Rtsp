@@ -241,6 +241,10 @@ def _guess_audio(codec_id: int, flags: int) -> str:
 # the ADTS header to raw AAC access units, and send them; SPEAKERSTOP (849) on idle.
 IOTYPE_SPEAKERSTART = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART") or "848")
 IOTYPE_SPEAKERSTOP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTOP") or "849")
+# If the camera closes the AV session when it receives SPEAKERSTART (848), set
+# OWLET_SKIP_SPEAKERSTART=1. Some cameras open the speaker channel bi-directionally
+# from AUDIOSTART alone and reject a separate SPEAKERSTART IOCTL.
+SKIP_SPEAKERSTART = os.environ.get("OWLET_SKIP_SPEAKERSTART", "0") != "0"
 TALK_FIFO = os.environ.get("OWLET_TALK_FIFO", "")
 # Speaker frame format. Defaults match what the cam streams to us (AAC, 8kHz mono);
 # overridable, and auto-filled from the live audio probe when it reports.
@@ -326,13 +330,24 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                 chunk = b""
             if chunk:
                 if not speaking:
-                    rc = _spk(IOTYPE_SPEAKERSTART)
+                    if SKIP_SPEAKERSTART:
+                        rc = 0
+                        log(f"[talk] speaker on (SPEAKERSTART skipped per OWLET_SKIP_SPEAKERSTART)")
+                    else:
+                        rc = _spk(IOTYPE_SPEAKERSTART)
+                        cid = _PROBED_AUDIO["codec_id"]
+                        log(f"[talk] speaker on (start ioctl={IOTYPE_SPEAKERSTART} rc={rc}, "
+                            f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x})")
+                        # If the camera closed the session in response to SPEAKERSTART,
+                        # bail NOW — don't try avSendAudioData on a dead av_idx (that
+                        # would hang the _AV_IO lock and freeze the video loop).
+                        if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                            log(f"[talk] SPEAKERSTART killed the session (rc={rc}). "
+                                f"Set OWLET_SKIP_SPEAKERSTART=1 in Advanced settings to bypass.")
+                            return
                     speaking = True
                     ts0 = time.time()
                     stats[0] = stats[1] = 0
-                    cid = _PROBED_AUDIO["codec_id"]
-                    log(f"[talk] speaker on (start ioctl={IOTYPE_SPEAKERSTART} rc={rc}, "
-                        f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x})")
                 buf = _send_adts(av, av_idx, buf + chunk, ts0, stats)
                 last_audio = time.monotonic()
             else:

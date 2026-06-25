@@ -124,6 +124,9 @@ function buildCard(cam, ports){
             <option value="">auto-probe</option><option value="2">Auto</option>
             <option value="1">DTLS</option><option value="0">Simple</option>
           </select></label>
+        <label style="grid-column:1/-1"><input type="checkbox" class="f-skip-spk"> Skip SPEAKERSTART IOCTL
+          <span class="hint" style="display:inline"> — enable if Talk drops the video. Some cameras open speaker bi-directionally from AUDIOSTART alone.</span>
+        </label>
       </div>
       <div class="row"><button class="save-adv">Save camera settings</button></div>
     </div>`;
@@ -133,6 +136,7 @@ function buildCard(cam, ports){
   el.querySelector(".f-uid").value = cam.uid || "";
   el.querySelector(".f-authkey").value = cam.authkey || "";
   el.querySelector(".f-sec").value = cam.av_security_mode || "";
+  el.querySelector(".f-skip-spk").checked = !!(cam.skip_speakerstart);
 
   el.querySelector(".connect").onclick = (e) => withLoading(e.currentTarget, async () => {
     await fetch(`/api/cameras/${cam.name}/diagnose`, {method:"POST"});
@@ -158,6 +162,7 @@ function buildCard(cam, ports){
       uid: el.querySelector(".f-uid").value,
       authkey: el.querySelector(".f-authkey").value,
       av_security_mode: el.querySelector(".f-sec").value,
+      skip_speakerstart: el.querySelector(".f-skip-spk").checked ? "1" : "",
     };
     const avpw = el.querySelector(".f-avpw").value;
     if (avpw) body.av_password = avpw;

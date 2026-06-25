@@ -80,7 +80,7 @@ ACCOUNT_DEFAULTS: dict[str, str] = {
 
 # Per-camera settings.
 CAMERA_FIELDS = ["name", "camera_dsn", "uid", "authkey", "av_password",
-                 "av_security_mode"]
+                 "av_security_mode", "skip_speakerstart"]
 CAMERA_DEFAULTS: dict[str, str] = {k: "" for k in CAMERA_FIELDS}
 
 # Home Assistant / MQTT — settable in the UI (env vars still work as defaults).
@@ -281,6 +281,8 @@ def camera_env(account: dict, cam: dict) -> dict[str, str]:
     }
     if cam.get("av_security_mode"):
         env["OWLET_AV_SECURITY_MODE"] = cam["av_security_mode"]
+    if cam.get("skip_speakerstart"):
+        env["OWLET_SKIP_SPEAKERSTART"] = "1"
     return env
 
 
