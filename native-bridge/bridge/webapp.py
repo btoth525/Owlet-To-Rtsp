@@ -123,6 +123,68 @@ def post_config():
 
 
 # --------------------------------------------------------------------------- #
+# Home Assistant / MQTT settings (UI-configurable)
+# --------------------------------------------------------------------------- #
+@app.get("/api/mqtt")
+def get_mqtt():
+    cfg = cs.load_config()
+    m = dict(cs.MQTT_DEFAULTS)
+    m.update(cfg.get("mqtt") or {})
+    m["password"] = _mask_pw(m.get("password"))
+    # surface whether env vars are forcing it on, so the UI can explain
+    m["env_host"] = bool(os.environ.get("OWLET_MQTT_HOST"))
+    return jsonify(m)
+
+
+@app.post("/api/mqtt")
+def post_mqtt():
+    incoming = request.json or {}
+    cfg = cs.load_config()
+    m = dict(cs.MQTT_DEFAULTS)
+    m.update(cfg.get("mqtt") or {})
+    for k in cs.MQTT_FIELDS:
+        if k not in incoming:
+            continue
+        val = incoming[k]
+        if k == "password" and val == "********":
+            continue
+        m[k] = "1" if (k == "enabled" and val in (True, "1", "on", "true")) else \
+            ("" if (k == "enabled") else val)
+    cfg["mqtt"] = m
+    if not save_config(cfg, regenerate=False):
+        return jsonify({"ok": False, "error": "config folder not writable"}), 500
+    log("Home Assistant (MQTT) settings saved — applying within a few seconds.")
+    return jsonify({"ok": True})
+
+
+@app.post("/api/mqtt/test")
+def test_mqtt():
+    incoming = request.json or {}
+    cfg = cs.load_config()
+    saved = dict(cs.MQTT_DEFAULTS); saved.update(cfg.get("mqtt") or {})
+    host = incoming.get("host") or saved.get("host")
+    if not host:
+        return jsonify({"ok": False, "error": "enter a broker host first"}), 400
+    port = int(incoming.get("port") or saved.get("port") or 1883)
+    user = incoming.get("user") or saved.get("user") or ""
+    pw = saved.get("password") if incoming.get("password") in (None, "********") \
+        else incoming.get("password")
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        return jsonify({"ok": False, "error": "paho-mqtt not installed in image"}), 500
+    try:
+        c = mqtt.Client()
+        if user:
+            c.username_pw_set(user, pw or "")
+        c.connect(host, port, 5)
+        c.disconnect()
+        return jsonify({"ok": True, "msg": f"Connected to {host}:{port} ✓"})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+# --------------------------------------------------------------------------- #
 # cameras
 # --------------------------------------------------------------------------- #
 def _go2rtc_streams() -> dict:

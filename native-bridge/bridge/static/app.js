@@ -463,8 +463,46 @@ async function loadVitals(){
   if(age!==null){ wrap.innerHTML += `<div class="vts hint">updated ${age}s ago</div>`; }
 }
 
+/* ---------- Home Assistant / MQTT ---------- */
+async function loadMqtt(){
+  let m; try { m = await (await fetch("/api/mqtt")).json(); } catch(e){ return; }
+  $("mqtt-enabled").checked = String(m.enabled).toLowerCase()==="1"||m.enabled===true;
+  $("mqtt-host").value = m.host||"";
+  $("mqtt-port").value = m.port||"1883";
+  $("mqtt-user").value = m.user||"";
+  $("mqtt-pass").value = m.password ? "********" : "";
+  $("mqtt-prefix").value = m.prefix||"homeassistant";
+  if(m.env_host){ $("mqtt-status").textContent="(an OWLET_MQTT_HOST env var is also set)"; }
+}
+function mqttBody(){
+  return {enabled:$("mqtt-enabled").checked, host:$("mqtt-host").value.trim(),
+    port:$("mqtt-port").value.trim(), user:$("mqtt-user").value.trim(),
+    password:$("mqtt-pass").value, prefix:$("mqtt-prefix").value.trim()};
+}
+async function saveMqtt(btn){
+  return withLoading(btn, async () => {
+    const r = await fetch("/api/mqtt",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(mqttBody())});
+    const j = await r.json();
+    toast(j.ok?"Home Assistant settings saved.":("Save failed: "+(j.error||"")), j.ok?"good":"bad");
+    if(j.ok) loadMqtt();
+  });
+}
+async function testMqtt(btn){
+  return withLoading(btn, async () => {
+    $("mqtt-status").textContent="Testing…";
+    const r = await fetch("/api/mqtt/test",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(mqttBody())});
+    const j = await r.json();
+    $("mqtt-status").textContent = j.ok ? (j.msg||"Connected ✓") : ("✗ "+(j.error||"failed"));
+    toast(j.ok?"Broker reachable ✓":("MQTT: "+(j.error||"failed")), j.ok?"good":"bad");
+  });
+}
+
 /* ---------- wire up ---------- */
 $("btn-probe").onclick = (e) => probeSensors(e.currentTarget);
+$("btn-save-mqtt").onclick = (e) => saveMqtt(e.currentTarget);
+$("btn-test-mqtt").onclick = (e) => testMqtt(e.currentTarget);
 $("btn-save-account").onclick = (e) => saveAccount(e.currentTarget);
 $("btn-testlogin").onclick = (e) => testLogin(e.currentTarget);
 $("btn-add-cam").onclick = (e) => addCamera(e.currentTarget);
@@ -501,6 +539,7 @@ refreshCameras();
 refreshFindings();
 loadSounds();
 loadVitals();
+loadMqtt();
 setInterval(refreshStatus, 5000);
 setInterval(loadVitals, 30000);
 setInterval(refreshCameras, 5000);

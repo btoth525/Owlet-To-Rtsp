@@ -58,6 +58,13 @@ CAMERA_FIELDS = ["name", "camera_dsn", "uid", "authkey", "av_password",
                  "av_security_mode"]
 CAMERA_DEFAULTS: dict[str, str] = {k: "" for k in CAMERA_FIELDS}
 
+# Home Assistant / MQTT — settable in the UI (env vars still work as defaults).
+MQTT_FIELDS = ["enabled", "host", "port", "user", "password", "prefix"]
+MQTT_DEFAULTS: dict[str, str] = {
+    "enabled": "", "host": "", "port": "1883", "user": "", "password": "",
+    "prefix": "homeassistant",
+}
+
 # The proven ffmpeg repackage pipeline (kept identical to the single-cam build):
 # no `-fflags nobuffer` (it served codec-less RTSP); analyzeduration/probesize so
 # it locks onto the first keyframe; wallclock timestamps so bursty P2P frames
@@ -92,6 +99,7 @@ def _unique(name: str, used: set[str]) -> str:
 def _empty() -> dict:
     cfg = dict(ACCOUNT_DEFAULTS)
     cfg["cameras"] = []
+    cfg["mqtt"] = dict(MQTT_DEFAULTS)
     return cfg
 
 
@@ -149,7 +157,31 @@ def load_config() -> dict:
     cams = data.get("cameras")
     cfg["cameras"] = _normalize_cameras(cams) if isinstance(cams, list) and cams \
         else _migrate_flat(data)
+
+    mq = data.get("mqtt") if isinstance(data.get("mqtt"), dict) else {}
+    cfg["mqtt"] = {k: (mq.get(k) if mq.get(k) not in (None,) else MQTT_DEFAULTS[k])
+                   for k in MQTT_FIELDS}
     return cfg
+
+
+def mqtt_settings(cfg: dict | None = None) -> dict:
+    """Effective MQTT config: UI settings, falling back to env vars. `enabled`
+    is true if explicitly enabled in the UI or an OWLET_MQTT_HOST env is set."""
+    cfg = cfg or load_config()
+    m = dict(MQTT_DEFAULTS)
+    m.update(cfg.get("mqtt") or {})
+    env = os.environ
+    host = m.get("host") or env.get("OWLET_MQTT_HOST", "")
+    out = {
+        "host": host,
+        "port": str(m.get("port") or env.get("OWLET_MQTT_PORT") or "1883"),
+        "user": m.get("user") or env.get("OWLET_MQTT_USER", ""),
+        "password": m.get("password") or env.get("OWLET_MQTT_PASS", ""),
+        "prefix": m.get("prefix") or env.get("OWLET_MQTT_PREFIX") or "homeassistant",
+    }
+    ui_enabled = str(m.get("enabled")).lower() in ("1", "true", "on", "yes")
+    out["enabled"] = bool(host) and (ui_enabled or bool(env.get("OWLET_MQTT_HOST")))
+    return out
 
 
 def find_camera(cfg: dict, name: str) -> dict | None:
@@ -173,6 +205,9 @@ def save_config(cfg: dict, regenerate: bool = True) -> bool:
     cameras = _normalize_cameras(cfg.get("cameras"))
     out = dict(account)
     out["cameras"] = cameras
+    mq = cfg.get("mqtt")
+    if isinstance(mq, dict):
+        out["mqtt"] = {k: mq.get(k, MQTT_DEFAULTS[k]) for k in MQTT_FIELDS}
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(CONFIG_PATH, "w") as fh:
@@ -230,25 +265,12 @@ def _exec_source(name: str) -> str:
         'F="$D/owlet-audio-%(n)s"; rm -f "$F"; mkfifo "$F" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
         'mkdir -p /config/vitals 2>/dev/null; '
-        'OV="/config/vitals/overlay-%(n)s.txt"; [ -f "$OV" ] || printf " " > "$OV"; '
         'export OWLET_AUDIO_FIFO="$F" OWLET_TALK_FIFO="$T" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
         'trap "rm -f $F $T" EXIT; '
-        # Video output: default is a pure copy (lowest latency, no CPU). With
-        # OWLET_OVERLAY=1 we burn the glass HUD (overlay text file) into the feed
-        # — that requires re-encoding, so we use h264_nvenc if this ffmpeg has it,
-        # else libx264 -tune zerolatency to keep the added latency small.
-        'VENC="-c:v copy"; VF=""; '
-        'if [ "${OWLET_OVERLAY:-0}" = "1" ]; then '
-        '  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then '
-        '    VENC="-c:v h264_nvenc -preset p2 -tune ll -g 60"; '
-        '  else '
-        '    VENC="-c:v libx264 -preset veryfast -tune zerolatency -g 60 -pix_fmt yuv420p"; '
-        '  fi; '
-        '  VF="-filter:v drawtext=fontfile=/app/fonts/DejaVuSans.ttf:textfile=$OV:reload=1'
-        ':fontcolor=white:fontsize=h/26:box=1:boxcolor=black@0.40:boxborderw=18'
-        ':shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-tw)/2:y=h-th-(h/16)"; '
-        'fi; '
+        # Main stream is always a pure copy (lowest latency, no CPU) so your app
+        # gets sub-second WebRTC. The glass HUD lives on a SEPARATE on-demand
+        # stream (see _overlay_source) so it never touches this one.
         'python3 /app/tutk_client.py 2>>%(l)s | '
         # Low-latency ingest: nobuffer + low_delay so ffmpeg doesn't sit on frames,
         # small analyze/probe so it locks on fast.
@@ -259,9 +281,32 @@ def _exec_source(name: str) -> str:
         # Re-encode AAC (don't copy): the camera's ADTS AAC has no global headers,
         # which ffmpeg's RTSP muxer rejects ("AAC with no global headers"); the
         # encoder emits proper headers. 16k mono is plenty for voice and ~free CPU.
-        '-map 0:v -map 1:a? $VF $VENC -c:a aac -ar 16000 -ac 1 -b:a 64k '
+        '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
         '-muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": name}
+    return "exec:bash -c '" + cmd + "'"
+
+
+def _overlay_source(name: str) -> str:
+    """A SEPARATE on-demand stream `<name>_overlay`: pull the already-running
+    clean stream from go2rtc and burn the glass HUD (overlay text file, written
+    by vitals_poller) into it. Costs nothing until something actually views it;
+    the clean `<name>` stream is never touched. Uses h264_nvenc if the runtime
+    has it, else libx264 -tune zerolatency."""
+    src = "rtsp://127.0.0.1:%s/%s" % (G_RTSP, name)
+    cmd = (
+        'OV="/config/vitals/overlay-%(n)s.txt"; mkdir -p /config/vitals 2>/dev/null; '
+        '[ -f "$OV" ] || printf " " > "$OV"; '
+        'VENC="-c:v libx264 -preset veryfast -tune zerolatency -g 60 -pix_fmt yuv420p"; '
+        'ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc && '
+        'VENC="-c:v h264_nvenc -preset p2 -tune ll -g 60"; '
+        'exec ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay '
+        '-rtsp_transport tcp -i %(src)s '
+        '-filter:v drawtext=fontfile=/app/fonts/DejaVuSans.ttf:textfile=$OV:reload=1'
+        ':fontcolor=white:fontsize=h/26:line_spacing=6:box=1:boxcolor=black@0.40:boxborderw=18'
+        ':shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-tw)/2:y=h-th-(h/16) '
+        '$VENC -c:a copy -muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
+    ) % {"n": name, "src": src}
     return "exec:bash -c '" + cmd + "'"
 
 
@@ -271,12 +316,22 @@ def render_go2rtc(cameras: list[dict]) -> str:
         "log:", "  level: info", "",
         "api:", f'  listen: ":{G_HTTP}"', "",
         "rtsp:", f'  listen: ":{G_RTSP}"', "",
-        "webrtc:", f'  listen: ":{G_WEBRTC}"', "",
-        "streams:",
+        "webrtc:", f'  listen: ":{G_WEBRTC}"',
     ]
+    # External WebRTC candidate(s) for sub-second from phones/other hosts. Set
+    # OWLET_WEBRTC_CANDIDATE to "<host-ip>:8555" (the mapped UDP/TCP port).
+    cand = os.environ.get("OWLET_WEBRTC_CANDIDATE", "").strip()
+    if cand:
+        lines.append("  candidates:")
+        for c in [x.strip() for x in cand.split(",") if x.strip()]:
+            lines.append(f"    - {c}")
+    lines += ["", "streams:"]
     for cam in cameras:
         lines.append(f"  {cam['name']}:")
         lines.append("    - " + _exec_source(cam["name"]))
+        # Optional glass-HUD variant, on-demand (free unless viewed).
+        lines.append(f"  {cam['name']}_overlay:")
+        lines.append("    - " + _overlay_source(cam["name"]))
     return "\n".join(lines) + "\n"
 
 

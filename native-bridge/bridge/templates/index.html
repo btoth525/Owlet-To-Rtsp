@@ -111,6 +111,27 @@
       </div>
     </section>
 
+    <!-- ============ HOME ASSISTANT ============ -->
+    <section class="card" id="card-mqtt">
+      <h2>🏠 Home Assistant <span class="spacer"></span>
+        <label class="switch"><input type="checkbox" id="mqtt-enabled"><span>Enable</span></label></h2>
+      <p class="hint">Publish every sock vital &amp; camera sensor to Home Assistant over MQTT —
+        entities appear automatically (MQTT discovery). Point this at your broker
+        (the Mosquitto add‑on). Temps are sent in °F.</p>
+      <div class="grid">
+        <label>Broker host <input id="mqtt-host" placeholder="192.168.1.x or core-mosquitto"></label>
+        <label>Port <input id="mqtt-port" value="1883"></label>
+        <label>Username <input id="mqtt-user" placeholder="(optional)" autocomplete="off"></label>
+        <label>Password <input id="mqtt-pass" type="password" placeholder="(optional)" autocomplete="off"></label>
+        <label>Discovery prefix <input id="mqtt-prefix" value="homeassistant"></label>
+      </div>
+      <div class="row">
+        <button id="btn-save-mqtt" class="primary"><span class="spin"></span>Save</button>
+        <button id="btn-test-mqtt"><span class="spin"></span>Test connection</button>
+        <span class="hint" id="mqtt-status"></span>
+      </div>
+    </section>
+
     <!-- ============ LIBRARIES ============ -->
     <section class="card" id="card-libs">
       <h2>🧩 TUTK libraries</h2>

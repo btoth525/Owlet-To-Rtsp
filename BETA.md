@@ -78,10 +78,13 @@ panel. Off by default.
 | `OWLET_VITALS_POLL` | `1` | continuously read sock vitals + cam sensors |
 | `OWLET_VITALS_INTERVAL` | `15` | seconds between sock vitals polls |
 | `OWLET_SENSORS` | `1` | publish cam room sensors (temp/humidity/noise/…) |
-| `OWLET_OVERLAY` | `0` | burn the glass HUD into the video (re‑encodes; CPU/latency cost) |
-| `OWLET_MQTT_HOST` | *(unset)* | enable Home Assistant MQTT discovery (broker IP) |
-| `OWLET_MQTT_PORT` | `1883` | MQTT broker port |
-| `OWLET_MQTT_USER` / `OWLET_MQTT_PASS` | *(unset)* | MQTT auth, if your broker needs it |
+| `OWLET_WEBRTC_CANDIDATE` | *(unset)* | `<host-ip>:8555` for sub‑second WebRTC from phones/other hosts |
+| `OWLET_MQTT_HOST` … | *(unset)* | Home Assistant MQTT — **easier to set in the UI** (🏠 card) |
+
+> A glass‑HUD variant of each camera is also exposed on‑demand as
+> `<camera>_overlay` (transcoded only when viewed). For app integration —
+> sub‑second WebRTC + the full data feed — see
+> `native-bridge/docs/app-integration.md`.
 
 ### 🩺 Sock vitals + camera room sensors → UI, app & Home Assistant
 The bridge reads the **Smart Sock** vitals (heart rate, oxygen, skin temp, sleep

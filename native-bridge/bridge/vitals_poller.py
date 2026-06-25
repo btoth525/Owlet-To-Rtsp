@@ -28,12 +28,6 @@ import config_store as cs
 POLL = int(os.environ.get("OWLET_VITALS_INTERVAL") or "15")
 SNAP = os.path.join(cs.VITALS_DIR, "snapshot.json")
 
-# Home Assistant / MQTT (all optional)
-MQTT_HOST = os.environ.get("OWLET_MQTT_HOST", "").strip()
-MQTT_PORT = int(os.environ.get("OWLET_MQTT_PORT") or "1883")
-MQTT_USER = os.environ.get("OWLET_MQTT_USER", "")
-MQTT_PASS = os.environ.get("OWLET_MQTT_PASS", "")
-DISCO_PREFIX = os.environ.get("OWLET_MQTT_PREFIX", "homeassistant")
 STATE_PREFIX = "owlet"
 
 # US/Imperial: report temperatures in °F.
@@ -80,29 +74,53 @@ HA_META = {
 
 
 class _Mqtt:
+    """Wraps a paho MQTT client; (re)connects when the UI/env settings change."""
+
     def __init__(self, log):
         self.log = log
         self.c = None
         self._announced: set[str] = set()
-        if not MQTT_HOST:
+        self._key = None          # settings fingerprint we're connected with
+        self.prefix = "homeassistant"
+
+    def ensure(self, s: dict):
+        """Connect/disconnect/reconnect to match settings dict `s`."""
+        key = (s.get("enabled"), s.get("host"), s.get("port"),
+               s.get("user"), s.get("password"), s.get("prefix"))
+        if key == self._key:
+            return
+        self._key = key
+        self._disconnect()
+        self._announced.clear()
+        if not s.get("enabled") or not s.get("host"):
             return
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
-            self.log("[vitals] OWLET_MQTT_HOST set but paho-mqtt isn't installed")
+            self.log("[vitals] MQTT enabled but paho-mqtt isn't installed")
             return
         try:
+            self.prefix = s.get("prefix") or "homeassistant"
             c = mqtt.Client()
-            if MQTT_USER:
-                c.username_pw_set(MQTT_USER, MQTT_PASS)
+            if s.get("user"):
+                c.username_pw_set(s["user"], s.get("password") or "")
             c.will_set(f"{STATE_PREFIX}/bridge/status", "offline", retain=True)
-            c.connect(MQTT_HOST, MQTT_PORT, 60)
+            c.connect(s["host"], int(s.get("port") or 1883), 60)
             c.loop_start()
             c.publish(f"{STATE_PREFIX}/bridge/status", "online", retain=True)
             self.c = c
-            self.log(f"[vitals] MQTT connected to {MQTT_HOST}:{MQTT_PORT}")
+            self.log(f"[vitals] MQTT connected to {s['host']}:{s.get('port')}")
         except Exception as e:  # noqa: BLE001
             self.log(f"[vitals] MQTT connect failed: {e}")
+
+    def _disconnect(self):
+        if self.c:
+            try:
+                self.c.loop_stop()
+                self.c.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        self.c = None
 
     @staticmethod
     def _slug(s: str) -> str:
@@ -146,7 +164,7 @@ class _Mqtt:
                 if is_bin:
                     cfg["payload_on"] = 1
                     cfg["payload_off"] = 0
-                self.c.publish(f"{DISCO_PREFIX}/{comp}/{uid}/config",
+                self.c.publish(f"{self.prefix}/{comp}/{uid}/config",
                                json.dumps(cfg), retain=True)
                 self._announced.add(uid)
         self.c.publish(state_topic, json.dumps(sensors), retain=True)
@@ -213,6 +231,7 @@ def main() -> None:
     while True:
         devices: list[dict] = []
         cfg = cs.load_config()
+        mq.ensure(cs.mqtt_settings(cfg))   # pick up UI changes live
         if cfg.get("email") and cfg.get("password"):
             try:
                 if api is None:
