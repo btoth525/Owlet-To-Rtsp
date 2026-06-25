@@ -402,10 +402,11 @@ async function discover(btn) {
 
 /* ---------- sensors / vitals ---------- */
 const SLEEP_STATES = {0:"Unknown",1:"Awake",8:"Light sleep",15:"Deep sleep"};
+// US/Imperial units by default: temperatures shown in °F (camera/sock report °C).
 const VITAL_META = {
   heart_rate:{icon:"❤️",label:"Heart rate",unit:" bpm"},
   oxygen:{icon:"🫁",label:"Oxygen",unit:"%"},
-  skin_temperature:{icon:"🌡️",label:"Skin temp",unit:"°C"},
+  skin_temperature:{icon:"🌡️",label:"Skin temp",unit:"°F",temp:1},
   sleep_state:{icon:"😴",label:"Sleep",unit:"",enum:SLEEP_STATES},
   movement:{icon:"🤸",label:"Movement",unit:""},
   battery:{icon:"🔋",label:"Sock battery",unit:"%"},
@@ -413,7 +414,7 @@ const VITAL_META = {
   base_station_on:{icon:"📡",label:"Base station",unit:"",bool:1},
   charging:{icon:"⚡",label:"Charging",unit:"",bool:1},
   signal_strength:{icon:"📶",label:"Signal",unit:" dBm"},
-  temperature:{icon:"🌡️",label:"Room temp",unit:"°C"},
+  temperature:{icon:"🌡️",label:"Room temp",unit:"°F",temp:1},
   humidity:{icon:"💧",label:"Humidity",unit:"%"},
   noise:{icon:"🔊",label:"Noise",unit:" dB"},
   brightness:{icon:"💡",label:"Brightness",unit:" lux"},
@@ -422,11 +423,13 @@ const VITAL_META = {
   wifi_rssi:{icon:"📶",label:"Cam WiFi",unit:" dBm"},
 };
 const VITAL_ORDER = Object.keys(VITAL_META);
+const cToF = (c)=>Math.round(c*9/5+32);
 function fmtVital(k,v){
   const m=VITAL_META[k]||{unit:""};
   if(v===null||v===undefined||v==="") return "—";
   if(m.enum) return m.enum[v]||v;
   if(m.bool) return (v&&v!=="0")?"On":"Off";
+  if(m.temp) return cToF(v)+m.unit;
   return v+m.unit;
 }
 async function probeSensors(btn){
