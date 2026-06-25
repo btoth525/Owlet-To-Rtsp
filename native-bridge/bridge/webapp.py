@@ -866,7 +866,10 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
         else:
             log(f"[talk] FIFO open check: {_e}")
     rate = os.environ.get("OWLET_TALK_RATE", "8000")
-    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "warning"] + input_args
+    # -y is CRITICAL: the output path is a pre-existing FIFO. Without -y ffmpeg
+    # sees an "existing file", prompts "Overwrite? [y/N]", gets no stdin, and
+    # exits writing ZERO bytes — so no audio ever reaches the camera speaker.
+    cmd = (["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"] + input_args
            + ["-ac", "1", "-ar", str(rate), "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
     log(f"[talk] cmd: {' '.join(cmd)}")
     with _PLAY_LOCK:

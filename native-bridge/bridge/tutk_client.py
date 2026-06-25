@@ -259,6 +259,14 @@ _PROBED_AUDIO: dict = {"codec_id": None, "flags": None}
 # their own threads, unlocked.)
 _AV_IO = threading.Lock()
 
+# Half-duplex coordination. The Owlet camera has ONE P2P session and the TUTK
+# lib is NOT safe doing simultaneous audio RECV (the probe) and audio SEND (talk)
+# on the same channel — doing both corrupts/kills the session (video drops and
+# avSendAudioData can hang the process, needing a container restart). So while the
+# talk thread is actively sending speaker audio, the audio-receive probe PAUSES
+# (exactly how the Owlet app behaves: it stops listening while you hold talk).
+_TALKING = threading.Event()
+
 
 def _talk_frameinfo(ts_ms: int) -> bytes:
     """16-byte FRAMEINFO_t for sent audio: codec_id@0, flags@2, timestamp@8
@@ -295,6 +303,12 @@ def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
             rc = av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
         if rc is not None and rc < 0:
             stats[1] += 1
+            # Record a session-close so the talk loop can stop immediately
+            # instead of hammering a dead channel (which can hang the process).
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE) \
+                    and len(stats) > 2:
+                stats[2] = rc
+                return buf[i + frame_len:]
         else:
             stats[0] += 1
         i += frame_len
@@ -321,7 +335,7 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     speaking = False
     last_audio = 0.0
     ts0 = time.time()
-    stats = [0, 0]   # [sent, rejected] avSendAudioData results
+    stats = [0, 0, 0]   # [sent, rejected, dead_rc] avSendAudioData results
     last_alive = time.monotonic()
 
     def _spk(ioctl):
@@ -342,6 +356,10 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
             if chunk:
                 log(f"[talk] read {len(chunk)} bytes from FIFO")
                 if not speaking:
+                    # Pause the audio-RECV probe BEFORE we start sending so the
+                    # two never overlap on the cam's single channel.
+                    _TALKING.set()
+                    time.sleep(0.06)   # let the probe loop notice + park
                     if SKIP_SPEAKERSTART:
                         rc = 0
                         log(f"[talk] speaker on (SPEAKERSTART skipped per OWLET_SKIP_SPEAKERSTART)")
@@ -356,21 +374,32 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                         if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
                             log(f"[talk] SPEAKERSTART killed the session (rc={rc}). "
                                 f"Set OWLET_SKIP_SPEAKERSTART=1 in Advanced settings to bypass.")
+                            _TALKING.clear()
                             return
                     speaking = True
                     ts0 = time.time()
-                    stats[0] = stats[1] = 0
+                    stats[0] = stats[1] = stats[2] = 0
                 buf = _send_adts(av, av_idx, buf + chunk, ts0, stats)
                 last_audio = time.monotonic()
+                # If the camera tore the session down mid-send, stop NOW so we
+                # don't keep calling avSendAudioData on a dead channel (hangs).
+                if stats[2]:
+                    log(f"[talk] camera closed the session mid-send (rc={stats[2]}); "
+                        f"stopping talk. Tick 'Skip SPEAKERSTART' if this persists.")
+                    speaking = False
+                    _TALKING.clear()
+                    return
             else:
                 if speaking and time.monotonic() - last_audio > 0.8:
                     _spk(IOTYPE_SPEAKERSTOP)
                     speaking = False
                     buf = b""
+                    _TALKING.clear()   # resume the audio-RECV probe
                     log(f"[talk] speaker off (idle) — sent {stats[0]} frames, "
                         f"{stats[1]} rejected")
                 time.sleep(0.02)
     finally:
+        _TALKING.clear()   # always let the audio-RECV probe resume
         if speaking:
             try:
                 _spk(IOTYPE_SPEAKERSTOP)
@@ -401,6 +430,12 @@ def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     started = time.time()
     try:
         while not stop_evt.is_set():
+            # Half-duplex: while the talk thread is pushing speaker audio, STOP
+            # receiving audio. Simultaneous send+recv on the cam's single AV
+            # channel corrupts the session (drops video / wedges the process).
+            if _TALKING.is_set():
+                time.sleep(0.05)
+                continue
             try:
                 rc = av.avRecvAudioData(av_idx, abuf, AUDIO_BUF, ainfo, FINFO_BUF, byref(aidx))
             except Exception as e:  # noqa: BLE001
