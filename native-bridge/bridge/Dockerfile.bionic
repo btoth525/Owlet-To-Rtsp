@@ -19,11 +19,11 @@ RUN /entrypoint.sh bash -c 'true'
 
 # 2) Install python + ffmpeg + pip deps as the Termux user (pkg/apt refuse root).
 USER 1000
-RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir requests flask'
+RUN bash -lc 'yes | pkg install -y python ffmpeg && pip install --no-cache-dir requests flask paho-mqtt'
 USER 0
 
 COPY --from=dl /go2rtc /usr/local/bin/go2rtc
-COPY owlet_api.py owlet_vitals.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh /app/
+COPY owlet_api.py owlet_vitals.py vitals_poller.py tutk_client.py webapp.py lib_extract.py config_store.py render_streams.py keepalive.py go2rtc.yaml start-bionic.sh /app/
 COPY templates /app/templates
 COPY static /app/static
 RUN chmod +x /app/start-bionic.sh

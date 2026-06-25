@@ -61,4 +61,11 @@ if [ "${OWLET_KEEPALIVE:-1}" = "1" ]; then
   python3 /app/keepalive.py &
 fi
 
+# Continuously read sock vitals + cam sensors -> snapshot.json (web UI + your
+# app's /api/vitals), the burned-in overlay text, and Home Assistant (MQTT, if
+# OWLET_MQTT_HOST is set). Set OWLET_VITALS_POLL=0 to disable.
+if [ "${OWLET_VITALS_POLL:-1}" = "1" ]; then
+  python3 /app/vitals_poller.py &
+fi
+
 exec go2rtc -config "$GO2RTC_CFG"
