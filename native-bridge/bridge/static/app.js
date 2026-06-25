@@ -423,13 +423,12 @@ const VITAL_META = {
   wifi_rssi:{icon:"📶",label:"Cam WiFi",unit:" dBm"},
 };
 const VITAL_ORDER = Object.keys(VITAL_META);
-const cToF = (c)=>Math.round(c*9/5+32);
+// /api/vitals already returns °F (units=us), so no client-side conversion.
 function fmtVital(k,v){
   const m=VITAL_META[k]||{unit:""};
   if(v===null||v===undefined||v==="") return "—";
   if(m.enum) return m.enum[v]||v;
   if(m.bool) return (v&&v!=="0")?"On":"Off";
-  if(m.temp) return cToF(v)+m.unit;
   return v+m.unit;
 }
 async function probeSensors(btn){

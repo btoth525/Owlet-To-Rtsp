@@ -428,9 +428,33 @@ def _cam_sensor_devices() -> list[dict]:
     return out
 
 
+# Temperatures are stored raw (°C); the API serves US/Imperial (°F) so the web
+# UI and the native app both get °F from one place. ?units=metric for raw °C.
+_TEMP_KEYS = ("temperature", "skin_temperature")
+
+
+def _convert_units(devices: list[dict], units: str) -> None:
+    if units == "metric":
+        return
+    for d in devices:
+        s = d.get("sensors") or {}
+        for k in _TEMP_KEYS:
+            if s.get(k) is not None:
+                try:
+                    s[k] = round(s[k] * 9 / 5 + 32)
+                except (TypeError, ValueError):
+                    pass
+
+
 @app.get("/api/vitals")
 def vitals_latest():
+    """Live sock vitals + cam room sensors for the web UI and the native app.
+
+    Shape: {ts, units, devices:[{dsn,name,kind,model,ts,sensors:{...}}]}.
+    Temperatures are °F by default (US); pass ?units=metric for °C.
+    """
     import json as _json
+    units = (request.args.get("units") or "us").lower()
     payload = {"ts": None, "devices": []}
     try:
         with open(VITALS_CACHE) as f:
@@ -445,6 +469,8 @@ def vitals_latest():
         existing = {d.get("dsn") for d in payload.get("devices", [])}
         payload.setdefault("devices", [])
         payload["devices"] += [c for c in cams if c["dsn"] not in existing]
+    _convert_units(payload.get("devices", []), units)
+    payload["units"] = "metric" if units == "metric" else "us"
     return jsonify(payload)
 
 

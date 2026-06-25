@@ -234,14 +234,18 @@ def _exec_source(name: str) -> str:
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
         'trap "rm -f $F $T" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
-        'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
-        '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
-        '-use_wallclock_as_timestamps 1 -thread_queue_size 1024 -f aac -i "$F" '
+        # Low-latency ingest: nobuffer + low_delay so ffmpeg doesn't sit on
+        # frames, small analyze/probe so it locks on fast. Video is copied (no
+        # re-encode) so glass-to-glass is basically the WebRTC jitter buffer.
+        'ffmpeg -hide_banner -loglevel warning -fflags nobuffer+genpts -flags low_delay '
+        '-avioflags direct -max_delay 200000 '
+        '-use_wallclock_as_timestamps 1 -analyzeduration 1000000 -probesize 1000000 -f h264 -i - '
+        '-use_wallclock_as_timestamps 1 -thread_queue_size 512 -f aac -i "$F" '
         # Re-encode AAC (don't copy): the camera's ADTS AAC has no global headers,
         # which ffmpeg's RTSP muxer rejects ("AAC with no global headers"); the
         # encoder emits proper headers. 16k mono is plenty for voice and ~free CPU.
         '-map 0:v -map 1:a? -c:v copy -c:a aac -ar 16000 -ac 1 -b:a 64k '
-        '-f rtsp -rtsp_transport tcp {output}'
+        '-muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": name}
     return "exec:bash -c '" + cmd + "'"
 
