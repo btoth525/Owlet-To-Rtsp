@@ -196,9 +196,10 @@ def _realtime_thread(av, av_idx, stop_evt):
                         humidity=int.from_bytes(b[4:8], "little", signed=True),
                         noise=int.from_bytes(b[8:12], "little", signed=True),
                         brightness=int.from_bytes(b[12:16], "little", signed=True),
-                        # only read rssi if the response actually carries byte 16
-                        wifi_rssi=(int.from_bytes(b[16:17], "little", signed=True)
-                                   if rc >= 17 else None),
+                        # wifi_rssi is a 4-byte LE int at offset 16 (confirmed
+                        # from the Owlet app: a0.c([B],0x10) reads a signed int32).
+                        wifi_rssi=(int.from_bytes(b[16:20], "little", signed=True)
+                                   if rc >= 20 else None),
                     )
                     break
         except Exception:  # noqa: BLE001
