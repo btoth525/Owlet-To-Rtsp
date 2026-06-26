@@ -545,6 +545,11 @@ $("btn-copy").onclick  = async () => {
   t.addEventListener("touchend",up,{passive:false});
   $("btn-stop-sound").onclick=async()=>{ await fetch(`/api/talk/${talkCam()}/stop`,{method:"POST"}); toast("Stopped.",""); };
   const tc=$("talk-cam"); if(tc) tc.addEventListener("change", loadVolume);
+  if($("btn-lullaby-load")) $("btn-lullaby-load").onclick=loadLullabies;
+  if($("btn-lullaby-stop")) $("btn-lullaby-stop").onclick=async()=>{
+    const r=await fetch(`/api/lullaby/${talkCam()}/stop`,{method:"POST"});
+    toast(r.ok?"⏹ camera sound stopped":"stop failed", r.ok?"good":"bad");
+  };
   $("btn-sound-browse").onclick=()=>$("sound-file").click();
   $("sound-file").onchange=(e)=>uploadSounds(e.target.files);
   const dz=$("sound-drop");
@@ -562,6 +567,33 @@ $("btn-copy").onclick  = async () => {
     });
   }
 })();
+
+async function loadLullabies(){
+  const box=$("lullaby-list"); if(!box) return;
+  box.innerHTML = `<span class="hint">Asking the camera…</span>`;
+  let j; try{ j=await (await fetch(`/api/lullaby/${talkCam()}/tracks`)).json(); }
+  catch(e){ box.innerHTML=`<span class="hint">couldn't reach camera</span>`; return; }
+  if(!j.ok){ box.innerHTML=`<span class="hint">${esc(j.error||"no tracks")}</span>`; return; }
+  const items=j.items||[];
+  if(!items.length){ box.innerHTML=`<span class="hint">Camera reported no built-in tracks.</span>`; return; }
+  box.innerHTML="";
+  items.forEach((it,i)=>{
+    const dur = it.duration_ms ? Math.round(it.duration_ms/1000)+"s" : "";
+    const row=document.createElement("div"); row.className="snd-row";
+    row.innerHTML=`<button class="mini snd-play">▶</button><span class="snd-name">Track ${i+1}
+      <span class="hint">${esc((it.uuid||"").slice(0,8))} ${dur}</span></span>`;
+    row.querySelector(".snd-play").onclick=async()=>{
+      const loop=!!($("snd-loop")&&$("snd-loop").checked);
+      const tmin=($("snd-timer")?parseFloat($("snd-timer").value):0)||0;
+      const payload={uuid:it.uuid, repeat:loop};
+      if(tmin>0) payload.timeout_ms=Math.round(tmin*60000);
+      const r=await fetch(`/api/lullaby/${talkCam()}/play`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const jj=await r.json();
+      toast(r.ok?`🎼 playing on camera${loop?" 🔁":""}${tmin?` ⏱${tmin}m`:""}`:(jj.error||"play failed"), r.ok?"good":"bad");
+    };
+    box.appendChild(row);
+  });
+}
 
 async function loadVolume(){
   const vs=$("spk-vol"), vv=$("spk-vol-val"); if(!vs) return;

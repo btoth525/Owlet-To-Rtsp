@@ -321,10 +321,12 @@ def _exec_source(name: str) -> str:
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
         'V="$D/owlet-vol-%(n)s"; '
         '[ -n "$OWLET_SPK_VOL" ] && printf "%%s" "$OWLET_SPK_VOL" > "$V"; '
+        'C="$D/owlet-audiocmd-%(n)s"; R="$D/owlet-audioresp-%(n)s"; rm -f "$C" "$R"; '
         'mkdir -p /config/vitals 2>/dev/null; '
         'export OWLET_TALK_FIFO="$T" OWLET_VOL_FILE="$V" '
+        'OWLET_AUDIOCMD_FILE="$C" OWLET_AUDIORESP_FILE="$R" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
-        'trap "rm -f $T $V" EXIT; '
+        'trap "rm -f $T $V $C $R" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
@@ -428,6 +430,18 @@ def vol_file_path(name: str) -> str:
     _volume_thread watches it (${TMPDIR:-/tmp}/owlet-vol-<name>)."""
     tmp = os.environ.get("TMPDIR") or "/tmp"
     return os.path.join(tmp, "owlet-vol-" + name)
+
+
+def audiocmd_file_path(name: str) -> str:
+    """Native audio-player request file the UI writes JSON commands into."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-audiocmd-" + name)
+
+
+def audioresp_file_path(name: str) -> str:
+    """Native audio-player response file tutk_client writes the camera reply into."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-audioresp-" + name)
 
 
 # Per-camera room-sensor sidecar (temp/humidity/noise/brightness/motion/sound),

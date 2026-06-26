@@ -253,6 +253,107 @@ def _volume_thread(av, av_idx, stop_evt):
         stop_evt.wait(1.0)
 
 
+def _json_ioctl(av, av_idx, obj, want_resp=True, timeout=2.5):
+    """Send one audio-player JSON command via IOCTL 0x60105 (plain UTF-8 JSON, no
+    framing — exactly as the Owlet app). When want_resp, drain avRecvIOCtrl for the
+    matching 0x60105 reply and return the decoded dict; else just send. The whole
+    send+drain is under _AV_IO so it can't interleave with the sensor poller."""
+    body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    io_type = c_int(0)
+    rbuf = create_string_buffer(4096)
+    with _AV_IO:
+        rc = av.avSendIOCtrl(av_idx, IOTYPE_OWLET_JSON, c_char_p(body), len(body))
+        if rc < 0:
+            return {"error": f"send rc={rc}"}
+        if not want_resp:
+            return {"ok": True}
+        if not hasattr(av, "avRecvIOCtrl"):
+            return {"ok": True, "note": "no avRecvIOCtrl in lib"}
+        deadline = time.time() + timeout
+        acc = b""
+        while time.time() < deadline:
+            rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 4096, 500)
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                return {"error": f"session closed rc={rc}"}
+            if rc < 0:
+                continue  # timeout / not-ready this round — keep waiting
+            if io_type.value == IOTYPE_OWLET_JSON and rc > 0:
+                acc += rbuf.raw[:rc]
+                try:
+                    return json.loads(acc.decode("utf-8", "ignore"))
+                except ValueError:
+                    continue  # camera may deliver the JSON in pieces
+        return {"error": "no response (timeout)"}
+
+
+def _handle_audio_cmd(av, av_idx, req: dict) -> dict:
+    """Translate a small UI request into the app's wire commands."""
+    action = req.get("action")
+    if action == "sources":
+        return _json_ioctl(av, av_idx, {"audio_player_sources": {}})
+    if action == "state":
+        return _json_ioctl(av, av_idx, {"audio_player_state": {}})
+    if action == "reset":
+        return _json_ioctl(av, av_idx, {"audio_player_reset": {}}, want_resp=False)
+    if action in ("play", "pause", "stop", "next", "prev"):
+        uuids = req.get("uuids") or []
+        if uuids:
+            items = [{"uuid": u} for u in uuids]
+            _json_ioctl(av, av_idx,
+                        {"audio_player_queue": {"queue": {"items": items}}},
+                        want_resp=False)
+        if req.get("repeat") is not None or req.get("timeout_ms") is not None:
+            q = {}
+            if req.get("repeat") is not None:
+                q["repeat"] = bool(req["repeat"])
+            if req.get("timeout_ms") is not None:
+                q["timeout_ms"] = int(req["timeout_ms"])
+            _json_ioctl(av, av_idx, {"audio_player_set": {"player": {"queue": q}}},
+                        want_resp=False)
+        _json_ioctl(av, av_idx,
+                    {"audio_player_transport": {"player": {"action": action}}},
+                    want_resp=False)
+        return {"ok": True, "action": action}
+    return {"error": f"unknown action {action!r}"}
+
+
+def _audioplayer_thread(av, av_idx, stop_evt):
+    """Watch AUDIOCMD_FILE for a JSON request, run it on the camera's native audio
+    player, write the reply (with the request's id) to AUDIORESP_FILE. Inert until
+    a request appears, so it sends no IOCTL traffic by default."""
+    if not AUDIOCMD_FILE or not hasattr(av, "avSendIOCtrl"):
+        return
+    last_mtime = 0.0
+    while not stop_evt.is_set():
+        try:
+            mtime = os.path.getmtime(AUDIOCMD_FILE)
+        except OSError:
+            mtime = 0.0
+        if mtime and mtime != last_mtime:
+            last_mtime = mtime
+            try:
+                with open(AUDIOCMD_FILE) as f:
+                    req = json.load(f)
+            except (OSError, ValueError):
+                req = None
+            if isinstance(req, dict):
+                log(f"[lullaby] cmd: {req.get('action')}")
+                try:
+                    resp = _handle_audio_cmd(av, av_idx, req)
+                except Exception as e:  # noqa: BLE001
+                    resp = {"error": str(e)}
+                resp["id"] = req.get("id")
+                if AUDIORESP_FILE:
+                    try:
+                        tmp = AUDIORESP_FILE + ".tmp"
+                        with open(tmp, "w") as f:
+                            json.dump(resp, f)
+                        os.replace(tmp, AUDIORESP_FILE)
+                    except OSError:
+                        pass
+        stop_evt.wait(0.4)
+
+
 # --- audio probe (step 1: capture + report the camera's audio format) ---------
 # The Owlet cam carries audio on the same Kalay AV channel as video, but its codec
 # / sample rate are undocumented. This probe reads the audio channel READ-ONLY (it
@@ -300,6 +401,18 @@ try:
     SPK_VOL_INITIAL = int(os.environ.get("OWLET_SPK_VOL") or "-1")
 except ValueError:
     SPK_VOL_INITIAL = -1
+
+# Native audio player (camera's built-in soothing-sounds/lullabies). Driven by the
+# Owlet app's JSON-over-IOCTL protocol: IOTYPE_USER_IPCAM_OWLET_JSON_MSG_REQ =
+# 0x60105 = 393477, request AND response share that io_type, payload is plain
+# UTF-8 JSON with no binary framing. The web UI drops a small JSON request into
+# AUDIOCMD_FILE; _audioplayer_thread runs it and writes the camera's reply to
+# AUDIORESP_FILE. The camera self-reports its track UUIDs (audio_player_sources),
+# so no cloud is needed. No IOCTL is sent unless the user triggers an action, so
+# this is inert by default.
+IOTYPE_OWLET_JSON = int(os.environ.get("OWLET_IOTYPE_JSON_MSG") or "393477")
+AUDIOCMD_FILE = os.environ.get("OWLET_AUDIOCMD_FILE", "")
+AUDIORESP_FILE = os.environ.get("OWLET_AUDIORESP_FILE", "")
 # If the camera closes the AV session when it receives SPEAKERSTART (848), set
 # OWLET_SKIP_SPEAKERSTART=1. Some cameras open the speaker channel bi-directionally
 # from AUDIOSTART alone and reject a separate SPEAKERSTART IOCTL.
@@ -770,6 +883,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
     talk_thr = None
     sensors_thr = None
     vol_thr = None
+    player_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -846,6 +960,19 @@ def stream_once(uid: str, sec_mode: int) -> int:
             except Exception as e:  # noqa: BLE001
                 log(f"[vol] start failed: {e}")
 
+        # Native audio player (camera built-in lullabies). Inert until the UI
+        # drops a command in AUDIOCMD_FILE — sends no IOCTL traffic by default.
+        if AUDIOCMD_FILE and hasattr(av, "avSendIOCtrl"):
+            try:
+                player_thr = threading.Thread(
+                    target=_audioplayer_thread, args=(av, av_idx, audio_stop),
+                    daemon=True)
+                player_thr.start()
+                log(f"[lullaby] native audio-player control active "
+                    f"(file={AUDIOCMD_FILE!r})")
+            except Exception as e:  # noqa: BLE001
+                log(f"[lullaby] start failed: {e}")
+
         # Room sensors: poll the GetRealtimeData IOCTL for humidity + brightness
         # (temp/noise/motion/sound already ride the frame info).
         if CAM_SENSORS_PATH and SENSORS_ENABLED:
@@ -908,7 +1035,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 av.avClientStop(av_idx)
             except Exception:  # noqa: BLE001
                 pass
-        for thr in (audio_thr, talk_thr, sensors_thr, vol_thr):
+        for thr in (audio_thr, talk_thr, sensors_thr, vol_thr, player_thr):
             if thr is not None:
                 thr.join(timeout=3)
                 if thr.is_alive():

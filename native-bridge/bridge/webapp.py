@@ -1055,6 +1055,100 @@ def talk_fifo_status(camera):
                         "error": str(e)}), 500
 
 
+# --------------------------------------------------------------------------- #
+# native audio player (camera built-in lullabies / soothing sounds)
+# --------------------------------------------------------------------------- #
+_LULLABY_SEQ = [0]
+_LULLABY_LOCK = threading.Lock()
+
+
+def _lullaby_rpc(camera: str, req: dict, want_resp: bool, timeout: float = 4.0):
+    """Drop a JSON command in the camera's audiocmd file; if want_resp, wait for
+    tutk_client to write the matching reply to the audioresp file."""
+    import json as _json
+    cmd_path = cs.audiocmd_file_path(camera)
+    resp_path = cs.audioresp_file_path(camera)
+    if not os.path.exists(cmd_path):
+        return False, {"error": "camera isn't streaming yet — start its stream first"}
+    with _LULLABY_LOCK:
+        _LULLABY_SEQ[0] += 1
+        rid = _LULLABY_SEQ[0]
+    req = dict(req, id=rid)
+    try:
+        with open(cmd_path, "w") as f:
+            _json.dump(req, f)
+    except OSError as e:  # noqa: BLE001
+        return False, {"error": f"cannot write command: {e}"}
+    if not want_resp:
+        return True, {"ok": True}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(resp_path) as f:
+                resp = _json.load(f)
+            if resp.get("id") == rid:
+                return True, resp
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.15)
+    return False, {"error": "no response from camera (timeout)"}
+
+
+@app.get("/api/lullaby/<camera>/tracks")
+def lullaby_tracks(camera):
+    """List the camera's built-in audio tracks (UUID + duration). The camera
+    self-reports these — no cloud needed."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "sources"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, "items": resp.get("items") or [], "raw": resp})
+
+
+@app.get("/api/lullaby/<camera>/state")
+def lullaby_state(camera):
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "state"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, "state": resp})
+
+
+@app.post("/api/lullaby/<camera>/play")
+def lullaby_play(camera):
+    """Play built-in tracks by UUID, with optional repeat + camera-side sleep
+    timer (timeout_ms)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    body = request.json or {}
+    uuids = body.get("uuids") or ([body["uuid"]] if body.get("uuid") else [])
+    req = {"action": "play", "uuids": uuids}
+    if body.get("repeat") is not None:
+        req["repeat"] = bool(body["repeat"])
+    if body.get("timeout_ms") is not None:
+        try:
+            req["timeout_ms"] = int(body["timeout_ms"])
+        except (TypeError, ValueError):
+            pass
+    ok, resp = _lullaby_rpc(camera, req, want_resp=False)
+    log(f"[lullaby] {camera}: play {len(uuids)} track(s) -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
+@app.post("/api/lullaby/<camera>/<action>")
+def lullaby_transport(camera, action):
+    """stop / pause / next / prev / reset for the native player."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    if action not in ("stop", "pause", "next", "prev", "reset"):
+        return jsonify({"ok": False, "error": "bad action"}), 400
+    ok, resp = _lullaby_rpc(camera, {"action": action}, want_resp=False)
+    log(f"[lullaby] {camera}: {action} -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
 @app.get("/api/volume/<camera>")
 def get_volume(camera):
     """Current speaker volume (0-100). Reads the live control file, falling back
