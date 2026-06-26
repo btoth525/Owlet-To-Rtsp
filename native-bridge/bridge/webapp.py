@@ -945,17 +945,47 @@ def delete_sound(fname):
     return jsonify({"ok": True})
 
 
+def _schedule_stop(camera, proc, seconds: float):
+    """Stop THIS playback process after `seconds` (the streamed-audio sleep timer).
+    The camera-side timer_ms only applies to the app's native player, so for
+    streamed mp3/lullaby we enforce the timer here by terminating this exact proc."""
+    def _stop():
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                log(f"[play] {camera}: sleep timer elapsed — stopped playback")
+        except Exception:  # noqa: BLE001
+            pass
+    t = threading.Timer(seconds, _stop)
+    t.daemon = True
+    t.start()
+
+
 @app.post("/api/play/<camera>")
 def play_sound(camera):
     from werkzeug.utils import secure_filename
     if not _known_camera(camera):
         return jsonify({"ok": False, "error": "no such camera"}), 404
-    fname = secure_filename((request.json or {}).get("file", ""))
+    body = request.json or {}
+    fname = secure_filename(body.get("file", ""))
     path = os.path.join(cs.SOUNDS_DIR, fname)
     if not fname or not os.path.exists(path):
         return jsonify({"ok": False, "error": "sound not found"}), 404
-    ok, msg, _ = _ffmpeg_to_speaker(camera, ["-re", "-i", path])
-    log(f"[play] {camera}: {fname} -> {msg}")
+    # loop=True repeats the track (lullaby/white-noise); timer_min auto-stops it.
+    input_args = ["-re"]
+    if body.get("loop"):
+        input_args = ["-stream_loop", "-1", "-re"]
+    input_args += ["-i", path]
+    ok, msg, proc = _ffmpeg_to_speaker(camera, input_args)
+    try:
+        timer_min = float(body.get("timer_min") or 0)
+    except (TypeError, ValueError):
+        timer_min = 0
+    if ok and proc and timer_min > 0:
+        _schedule_stop(camera, proc, timer_min * 60)
+    extra = (" [loop]" if body.get("loop") else "") + \
+            (f" [{timer_min:g}min timer]" if timer_min > 0 else "")
+    log(f"[play] {camera}: {fname} -> {msg}{extra}")
     return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
 
 
@@ -1023,6 +1053,52 @@ def talk_fifo_status(camera):
                                      "(check log for avSendAudioData or FIFO open errors)"}), 500
         return jsonify({"fifo": fifo, "exists": True, "reader": None,
                         "error": str(e)}), 500
+
+
+@app.get("/api/volume/<camera>")
+def get_volume(camera):
+    """Current speaker volume (0-100). Reads the live control file, falling back
+    to the saved per-camera setting."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    pct = None
+    try:
+        with open(cs.vol_file_path(camera)) as f:
+            pct = int(f.read().strip())
+    except (OSError, ValueError):
+        cam = cs.find_camera(cs.load_config(), camera) or {}
+        try:
+            pct = int(str(cam.get("spk_vol")).strip())
+        except (TypeError, ValueError):
+            pct = None
+    return jsonify({"ok": True, "percent": pct})
+
+
+@app.post("/api/volume/<camera>")
+def set_volume(camera):
+    """Set speaker volume 0-100. Writes the live control file (tutk_client pushes
+    SET_SPK_VOL to the camera within ~1s) and persists it as the camera's default."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    try:
+        pct = int((request.json or {}).get("percent"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "percent must be an integer 0-100"}), 400
+    pct = max(0, min(100, pct))
+    # live: write the control file the volume thread watches
+    try:
+        with open(cs.vol_file_path(camera), "w") as f:
+            f.write(str(pct))
+    except OSError as e:  # noqa: BLE001
+        log(f"[vol] cannot write control file: {e}")
+    # persist as the camera's default (applied on next (re)connect too)
+    cfg = cs.load_config()
+    cam = cs.find_camera(cfg, camera)
+    if cam is not None:
+        cam["spk_vol"] = str(pct)
+        save_config(cfg, regenerate=True)
+    log(f"[vol] {camera}: speaker volume set to {pct}%")
+    return jsonify({"ok": True, "percent": pct})
 
 
 @app.get("/")

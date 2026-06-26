@@ -98,6 +98,24 @@
         <button id="btn-stop-sound">⏹ Stop</button>
         <span class="hint" id="talk-status"></span>
       </div>
+      <div class="row" id="vol-row">
+        <label for="spk-vol" class="hint">🔊 Speaker volume</label>
+        <input type="range" id="spk-vol" min="0" max="100" step="20" value="60" style="flex:1">
+        <span class="hint" id="spk-vol-val">60%</span>
+      </div>
+      <div class="row" id="lullaby-opts">
+        <label class="hint"><input type="checkbox" id="snd-loop"> 🔁 Loop</label>
+        <label class="hint">⏱ Sleep timer
+          <select id="snd-timer">
+            <option value="0">off</option>
+            <option value="15">15 min</option>
+            <option value="30">30 min</option>
+            <option value="45">45 min</option>
+            <option value="60">1 hr</option>
+            <option value="120">2 hr</option>
+          </select>
+        </label>
+      </div>
       <div id="sound-drop" class="dropzone">
         <input type="file" id="sound-file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg" multiple hidden>
         🎵 Drag &amp; drop lullaby files here, or <button id="btn-sound-browse" class="mini">browse</button>

@@ -236,8 +236,12 @@ async function loadSounds(){
     row.innerHTML = `<button class="mini snd-play">▶</button><span class="snd-name">${esc(f)}</span>
       <span class="spacer"></span><button class="mini snd-del danger">🗑</button>`;
     row.querySelector(".snd-play").onclick = async () => {
-      const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f})});
-      const j = await r.json(); toast(r.ok ? `▶ ${f} → ${talkCam()}` : (j.message||j.error||"couldn't play"), r.ok?"good":"bad");
+      const loop = !!($("snd-loop") && $("snd-loop").checked);
+      const timer_min = ($("snd-timer") ? parseFloat($("snd-timer").value) : 0) || 0;
+      const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f, loop, timer_min})});
+      const j = await r.json();
+      const extra = (loop?" 🔁":"") + (timer_min?` ⏱${timer_min}m`:"");
+      toast(r.ok ? `▶ ${f} → ${talkCam()}${extra}` : (j.message||j.error||"couldn't play"), r.ok?"good":"bad");
     };
     row.querySelector(".snd-del").onclick = async () => {
       if(!confirm(`Delete ${f}?`)) return;
@@ -540,13 +544,32 @@ $("btn-copy").onclick  = async () => {
   t.addEventListener("mouseup",up);     t.addEventListener("mouseleave",up);
   t.addEventListener("touchend",up,{passive:false});
   $("btn-stop-sound").onclick=async()=>{ await fetch(`/api/talk/${talkCam()}/stop`,{method:"POST"}); toast("Stopped.",""); };
+  const tc=$("talk-cam"); if(tc) tc.addEventListener("change", loadVolume);
   $("btn-sound-browse").onclick=()=>$("sound-file").click();
   $("sound-file").onchange=(e)=>uploadSounds(e.target.files);
   const dz=$("sound-drop");
   ["dragover","dragenter"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add("over");}));
   ["dragleave","drop"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove("over");}));
   dz.addEventListener("drop",e=>uploadSounds(e.dataTransfer.files));
+
+  // speaker volume slider
+  const vs=$("spk-vol"), vv=$("spk-vol-val");
+  if(vs){
+    vs.addEventListener("input", ()=>{ if(vv) vv.textContent=vs.value+"%"; });
+    vs.addEventListener("change", async ()=>{
+      const r=await fetch(`/api/volume/${talkCam()}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({percent:parseInt(vs.value,10)})});
+      toast(r.ok?`🔊 volume ${vs.value}%`:"couldn't set volume", r.ok?"good":"bad");
+    });
+  }
 })();
+
+async function loadVolume(){
+  const vs=$("spk-vol"), vv=$("spk-vol-val"); if(!vs) return;
+  try{
+    const j=await (await fetch(`/api/volume/${talkCam()}`)).json();
+    if(j && j.percent!=null){ vs.value=j.percent; if(vv) vv.textContent=j.percent+"%"; }
+  }catch(e){}
+}
 
 loadAccount();
 startLogStream();
@@ -554,6 +577,7 @@ refreshStatus();
 refreshCameras();
 refreshFindings();
 loadSounds();
+loadVolume();
 loadVitals();
 loadMqtt();
 setInterval(refreshStatus, 5000);

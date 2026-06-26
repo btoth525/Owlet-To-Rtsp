@@ -207,6 +207,52 @@ def _realtime_thread(av, av_idx, stop_evt):
         stop_evt.wait(CAM_SENSOR_INTERVAL)
 
 
+def _vol_units(pct: int) -> int:
+    """Map a 0-100 percent to the camera's 0-5 device units, exactly like the
+    Owlet app's i1.i.a(): units = (pct*5 + 50) // 100, clamped to 0..5."""
+    pct = max(0, min(100, pct))
+    return max(0, min(5, (pct * 5 + 50) // 100))
+
+
+def _spk_vol_payload(pct: int) -> bytes:
+    """8-byte SET_SPK_VOL payload: int32 LE device-unit (0-5) at offset 0, rest 0."""
+    p = bytearray(8)
+    struct.pack_into("<i", p, 0, _vol_units(pct))
+    return bytes(p)
+
+
+def _volume_thread(av, av_idx, stop_evt):
+    """Watch VOL_FILE for a 0-100 percent and push SET_SPK_VOL to the camera when
+    it changes; apply OWLET_SPK_VOL once at start. Fully guarded — any error just
+    skips a round so it can never disturb the video pipeline."""
+    last = None
+
+    def _apply(pct: int):
+        nonlocal last
+        try:
+            payload = _spk_vol_payload(pct)
+            with _AV_IO:
+                rc = av.avSendIOCtrl(av_idx, IOTYPE_SET_SPK_VOL,
+                                     c_char_p(payload), len(payload))
+            log(f"[vol] speaker volume -> {pct}% (units={_vol_units(pct)}) rc={rc}")
+            last = pct
+        except Exception as e:  # noqa: BLE001
+            log(f"[vol] set failed: {e}")
+
+    if SPK_VOL_INITIAL >= 0:
+        _apply(SPK_VOL_INITIAL)
+    while not stop_evt.is_set():
+        if VOL_FILE:
+            try:
+                with open(VOL_FILE) as f:
+                    pct = int(f.read().strip())
+            except (OSError, ValueError):
+                pct = None
+            if pct is not None and pct != last:
+                _apply(pct)
+        stop_evt.wait(1.0)
+
+
 # --- audio probe (step 1: capture + report the camera's audio format) ---------
 # The Owlet cam carries audio on the same Kalay AV channel as video, but its codec
 # / sample rate are undocumented. This probe reads the audio channel READ-ONLY (it
@@ -242,6 +288,18 @@ def _guess_audio(codec_id: int, flags: int) -> str:
 # the ADTS header to raw AAC access units, and send them; SPEAKERSTOP (849) on idle.
 IOTYPE_SPEAKERSTART = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART") or "848")
 IOTYPE_SPEAKERSTOP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTOP") or "849")
+# Speaker volume IOCTL (IOTYPE_USER_IPCAM_SET_SPK_VOL_REQ = 0x60092 = 393362, from
+# the Owlet app). Payload: 8 bytes, a little-endian int32 "device unit" 0-5 at
+# offset 0. The app maps a 0-100% UI value to units via (pct*5 + 50) // 100.
+IOTYPE_SET_SPK_VOL = int(os.environ.get("OWLET_IOTYPE_SET_SPK_VOL") or "393362")
+# Live volume control: the web UI writes the desired 0-100 percent into this file;
+# _volume_thread watches it and pushes SET_SPK_VOL when it changes. OWLET_SPK_VOL
+# is an optional initial percent applied at connect (so a saved setting persists).
+VOL_FILE = os.environ.get("OWLET_VOL_FILE", "")
+try:
+    SPK_VOL_INITIAL = int(os.environ.get("OWLET_SPK_VOL") or "-1")
+except ValueError:
+    SPK_VOL_INITIAL = -1
 # If the camera closes the AV session when it receives SPEAKERSTART (848), set
 # OWLET_SKIP_SPEAKERSTART=1. Some cameras open the speaker channel bi-directionally
 # from AUDIOSTART alone and reject a separate SPEAKERSTART IOCTL.
@@ -711,6 +769,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
     audio_thr = None
     talk_thr = None
     sensors_thr = None
+    vol_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -772,6 +831,20 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 log(f"[talk] thread started — listening on {TALK_FIFO}")
             except Exception as e:  # noqa: BLE001
                 log(f"[talk] start failed: {e}")
+
+        # Speaker volume: watch the volume control file and push SET_SPK_VOL
+        # (0x60092) to the camera when it changes. Opt-in — only runs if a volume
+        # file or an initial OWLET_SPK_VOL is configured, so default behavior is
+        # unchanged. Sends a benign config IOCTL (not a channel op), serialized by
+        # _AV_IO like every other IOCTL.
+        if (VOL_FILE or SPK_VOL_INITIAL >= 0) and hasattr(av, "avSendIOCtrl"):
+            try:
+                vol_thr = threading.Thread(
+                    target=_volume_thread, args=(av, av_idx, audio_stop), daemon=True)
+                vol_thr.start()
+                log(f"[vol] speaker-volume control active (file={VOL_FILE!r})")
+            except Exception as e:  # noqa: BLE001
+                log(f"[vol] start failed: {e}")
 
         # Room sensors: poll the GetRealtimeData IOCTL for humidity + brightness
         # (temp/noise/motion/sound already ride the frame info).
@@ -835,7 +908,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 av.avClientStop(av_idx)
             except Exception:  # noqa: BLE001
                 pass
-        for thr in (audio_thr, talk_thr, sensors_thr):
+        for thr in (audio_thr, talk_thr, sensors_thr, vol_thr):
             if thr is not None:
                 thr.join(timeout=3)
                 if thr.is_alive():
