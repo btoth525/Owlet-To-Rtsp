@@ -545,6 +545,9 @@ $("btn-copy").onclick  = async () => {
   t.addEventListener("touchend",up,{passive:false});
   $("btn-stop-sound").onclick=async()=>{ await fetch(`/api/talk/${talkCam()}/stop`,{method:"POST"}); toast("Stopped.",""); };
   const tc=$("talk-cam"); if(tc) tc.addEventListener("change", loadVolume);
+  if($("btn-led-on")) $("btn-led-on").onclick=()=>setLed(true);
+  if($("btn-led-off")) $("btn-led-off").onclick=()=>setLed(false);
+  if($("btn-cam-info")) $("btn-cam-info").onclick=loadCamInfo;
   if($("btn-lullaby-load")) $("btn-lullaby-load").onclick=loadLullabies;
   if($("btn-lullaby-stop")) $("btn-lullaby-stop").onclick=async()=>{
     const r=await fetch(`/api/lullaby/${talkCam()}/stop`,{method:"POST"});
@@ -593,6 +596,19 @@ async function loadLullabies(){
     };
     box.appendChild(row);
   });
+}
+
+async function setLed(on){
+  const r=await fetch(`/api/led/${talkCam()}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({on})});
+  toast(r.ok?`💡 status light ${on?"on":"off"}`:"couldn't set light", r.ok?"good":"bad");
+}
+async function loadCamInfo(){
+  const box=$("cam-info"); if(box) box.textContent="Asking the camera…";
+  let j; try{ j=await (await fetch(`/api/info/${talkCam()}`)).json(); }catch(e){ if(box) box.textContent="couldn't reach camera"; return; }
+  if(!j.ok){ if(box) box.textContent=esc(j.error||"no info"); return; }
+  const parts=[]; if(j.model) parts.push("Model "+j.model); if(j.firmware) parts.push("FW "+j.firmware);
+  if(j.vendor) parts.push(j.vendor); if(j.version) parts.push("v"+j.version);
+  if(box) box.textContent=parts.join(" · ")||"(no fields)";
 }
 
 async function loadVolume(){

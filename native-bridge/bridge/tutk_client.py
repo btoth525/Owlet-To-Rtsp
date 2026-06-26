@@ -306,9 +306,65 @@ def _json_ioctl(av, av_idx, obj, want_resp=True, timeout=2.5):
         return {"error": "no response (timeout)"}
 
 
+def _raw_ioctl(av, av_idx, req_io, payload: bytes, resp_io=None, timeout=2.0):
+    """Send a binary IOCTL on the client channel; if resp_io is given, drain
+    avRecvIOCtrl for that response io_type and return its raw bytes (else None).
+    Whole transaction under _AV_IO so it can't interleave with other drainers."""
+    io_type = c_int(0)
+    rbuf = create_string_buffer(1024)
+    with _AV_IO:
+        rc = av.avSendIOCtrl(av_idx, req_io, c_char_p(payload), len(payload))
+        if rc < 0:
+            return None if resp_io is None else {"error": f"send rc={rc}"}
+        if resp_io is None:
+            return b""
+        if not hasattr(av, "avRecvIOCtrl"):
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 1024, 500)
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                return None
+            if rc < 0:
+                continue
+            if io_type.value == resp_io and rc > 0:
+                return rbuf.raw[:rc]
+    return None
+
+
 def _handle_audio_cmd(av, av_idx, req: dict) -> dict:
-    """Translate a small UI request into the app's wire commands."""
+    """Translate a small UI request into the app's wire commands (audio player +
+    camera controls — all client-channel IOCTLs)."""
     action = req.get("action")
+    # --- camera controls -----------------------------------------------------
+    if action == "led":
+        on = bool(req.get("on"))
+        payload = bytes([1, 1, 1, 0]) if on else bytes([0, 0, 0, 0])
+        _raw_ioctl(av, av_idx, IOTYPE_SET_LED, payload)
+        return {"ok": True, "led": "on" if on else "off"}
+    if action == "devinfo":
+        b = _raw_ioctl(av, av_idx, IOTYPE_DEVINFO_REQ, b"\x00\x00\x00\x00",
+                       resp_io=IOTYPE_DEVINFO_RESP, timeout=3.0)
+        if not isinstance(b, (bytes, bytearray)):
+            return {"error": "no devinfo response"}
+        def _ascii(off, ln):
+            return b[off:off + ln].split(b"\x00", 1)[0].decode("ascii", "ignore").strip()
+        info = {"model": _ascii(0, 16), "vendor": _ascii(16, 16)}
+        if len(b) >= 0x24:
+            v = int.from_bytes(b[0x20:0x24], "little", signed=False)
+            info["version"] = ".".join(str((v >> s) & 0xFF) for s in (24, 16, 8, 0))
+        if len(b) > 0x38:
+            info["firmware"] = _ascii(0x38, 16)
+        return {"ok": True, **info}
+    if action == "getvol":
+        b = _raw_ioctl(av, av_idx, IOTYPE_GET_SPK_MIC_VOL, b"\x00\x00\x00\x00",
+                       resp_io=IOTYPE_GET_SPK_MIC_VOL_RESP, timeout=3.0)
+        if not isinstance(b, (bytes, bytearray)) or len(b) < 4:
+            return {"error": "no volume response"}
+        units = int.from_bytes(b[0:4], "little", signed=True)
+        pct = max(0, min(100, (units * 100 + 2) // 5))   # app's i1.i.b()
+        return {"ok": True, "units": units, "percent": pct}
+    # --- native audio player -------------------------------------------------
     if action == "sources":
         return _json_ioctl(av, av_idx, {"audio_player_sources": {}})
     if action == "state":
@@ -351,6 +407,10 @@ def _audioplayer_thread(av, av_idx, stop_evt):
             mtime = 0.0
         if mtime and mtime != last_mtime:
             last_mtime = mtime
+            # Don't run a command (which drains avRecvIOCtrl) while talk is being
+            # set up — it could steal the SPEAKERSTART ack. Talk clips are short.
+            while _TALKING.is_set() and not stop_evt.is_set():
+                stop_evt.wait(0.1)
             try:
                 with open(AUDIOCMD_FILE) as f:
                     req = json.load(f)
@@ -427,6 +487,13 @@ except ValueError:
 # the Owlet app). Payload: 8 bytes, a little-endian int32 "device unit" 0-5 at
 # offset 0. The app maps a 0-100% UI value to units via (pct*5 + 50) // 100.
 IOTYPE_SET_SPK_VOL = int(os.environ.get("OWLET_IOTYPE_SET_SPK_VOL") or "393362")
+# Extra camera controls (all client-channel request/response IOCTLs, from the app):
+IOTYPE_GET_SPK_MIC_VOL = 0x60096       # req; resp 0x60097 carries spk units i32@0
+IOTYPE_GET_SPK_MIC_VOL_RESP = 0x60097
+IOTYPE_SET_LED = 0x40082               # status indicator light; ON=[1,1,1,0] OFF=[0,0,0,0]
+IOTYPE_SET_LED_RESP = 0x40083
+IOTYPE_DEVINFO_REQ = 0x330             # model/vendor/firmware; resp 0x331
+IOTYPE_DEVINFO_RESP = 0x331
 # Live volume control: the web UI writes the desired 0-100 percent into this file;
 # _volume_thread watches it and pushes SET_SPK_VOL when it changes. OWLET_SPK_VOL
 # is an optional initial percent applied at connect (so a saved setting persists).

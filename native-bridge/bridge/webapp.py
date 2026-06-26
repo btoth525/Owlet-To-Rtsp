@@ -1149,12 +1149,39 @@ def lullaby_transport(camera, action):
     return jsonify({"ok": ok, **resp}), (200 if ok else 502)
 
 
-@app.get("/api/volume/<camera>")
-def get_volume(camera):
-    """Current speaker volume (0-100). Reads the live control file, falling back
-    to the saved per-camera setting."""
+@app.post("/api/led/<camera>")
+def set_led(camera):
+    """Turn the camera's status indicator light on/off (the app's SET_LED_STATUS)."""
     if not _known_camera(camera):
         return jsonify({"ok": False, "error": "no such camera"}), 404
+    on = bool((request.json or {}).get("on"))
+    ok, resp = _lullaby_rpc(camera, {"action": "led", "on": on}, want_resp=False)
+    log(f"[led] {camera}: {'on' if on else 'off'} -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
+@app.get("/api/info/<camera>")
+def camera_info(camera):
+    """Camera model / vendor / firmware (the app's DEVINFO)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "devinfo"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, **resp})
+
+
+@app.get("/api/volume/<camera>")
+def get_volume(camera):
+    """Current speaker volume (0-100). Prefers the camera's actual value (live
+    GET_SPK_MIC_VOL), then the live control file, then the saved setting."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    # best-effort live readback from the camera
+    if os.path.exists(cs.audiocmd_file_path(camera)):
+        ok, resp = _lullaby_rpc(camera, {"action": "getvol"}, want_resp=True, timeout=3.5)
+        if ok and resp.get("percent") is not None:
+            return jsonify({"ok": True, "percent": resp["percent"], "source": "camera"})
     pct = None
     try:
         with open(cs.vol_file_path(camera)) as f:
@@ -1165,7 +1192,7 @@ def get_volume(camera):
             pct = int(str(cam.get("spk_vol")).strip())
         except (TypeError, ValueError):
             pct = None
-    return jsonify({"ok": True, "percent": pct})
+    return jsonify({"ok": True, "percent": pct, "source": "saved"})
 
 
 @app.post("/api/volume/<camera>")
