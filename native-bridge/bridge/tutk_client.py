@@ -250,6 +250,13 @@ TALK_FIFO = os.environ.get("OWLET_TALK_FIFO", "")
 # overridable, and auto-filled from the live audio probe when it reports.
 SPEAKER_CODEC_ID = int(os.environ.get("OWLET_SPEAKER_CODEC_ID") or "0x88", 0)
 SPEAKER_FLAGS = int(os.environ.get("OWLET_SPEAKER_FLAGS") or "0x02", 0)
+# Whether to send the AAC frame with its ADTS header intact. We default to
+# stripping it (raw AAC access unit) but some camera speaker decoders need the
+# ADTS header to learn the sample-rate/profile and stay SILENT without it — so
+# OWLET_TALK_KEEP_ADTS=1 sends the full ADTS frame. If the cam accepts frames
+# (0 rejected) but you hear nothing, flip this.
+TALK_KEEP_ADTS = (os.environ.get("OWLET_TALK_KEEP_ADTS", "") or "").lower() in (
+    "1", "true", "yes", "on")
 _PROBED_AUDIO: dict = {"codec_id": None, "flags": None}
 
 # Serializes every avSendIOCtrl / avRecvIOCtrl / avSendAudioData call. ctypes
@@ -304,7 +311,9 @@ def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list,
         if n - i < frame_len:
             break  # frame not fully buffered yet
         hdr = 7 if (buf[i + 1] & 0x01) else 9   # protection_absent -> 7-byte header
-        raw = buf[i + hdr:i + frame_len]
+        # Default: strip ADTS -> raw AAC access unit. With OWLET_TALK_KEEP_ADTS=1
+        # send the whole frame (header included) — some cam decoders need it.
+        raw = buf[i:i + frame_len] if TALK_KEEP_ADTS else buf[i + hdr:i + frame_len]
         fi = _talk_frameinfo(int((time.time() - ts0) * 1000))
         with _AV_IO:
             rc = av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
@@ -374,7 +383,8 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                         rc = _spk(IOTYPE_SPEAKERSTART)
                         cid = _PROBED_AUDIO["codec_id"]
                         log(f"[talk] speaker on (start ioctl={IOTYPE_SPEAKERSTART} rc={rc}, "
-                            f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x})")
+                            f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x}, "
+                            f"adts={'kept' if TALK_KEEP_ADTS else 'stripped'})")
                         # If the camera closed the session in response to SPEAKERSTART,
                         # bail NOW — don't try avSendAudioData on a dead av_idx (that
                         # would hang the _AV_IO lock and freeze the video loop).
