@@ -93,6 +93,7 @@ IOTC_ER_ALREADY_INITIALIZED = -3
 AV_ER_DATA_NOREADY = -20012
 AV_ER_REMOTE_TIMEOUT_DISCONNECT = -20015
 AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
+AV_ER_IOTC_CHANNEL_IN_USED = -20027   # avServStart2 on a channel already claimed
 
 # --- camera environmental sensors (temp/humidity/noise/brightness) ------------
 # Reverse-engineered from the Owlet app (see docs/owlet-cam-sensors.md). Temp +
@@ -104,7 +105,18 @@ CAM_SENSORS_PATH = os.environ.get("OWLET_CAM_SENSORS", "")
 SENSORS_ENABLED = os.environ.get("OWLET_SENSORS", "1") != "0"
 IOTYPE_GET_REALTIME_REQ = 960   # 0x3C0
 IOTYPE_GET_REALTIME_RESP = 961  # 0x3C1
-CAM_SENSOR_INTERVAL = int(os.environ.get("OWLET_SENSOR_INTERVAL") or "10")
+# The Owlet app polls GET_REALTIME_DATA every 5s for the production vitals; we
+# poll a bit faster (humidity/brightness/wifi only come from this IOCTL). It's a
+# cheap mutex-serialized req/resp, so 2s is safe.
+CAM_SENSOR_INTERVAL = int(os.environ.get("OWLET_SENSOR_INTERVAL") or "2")
+# Temperature rides EVERY video frame in the frame-info struct — the app reads it
+# per-frame for the live readout, so it's effectively instant. We publish it on
+# this (much shorter) interval rather than the IOCTL interval. ~1s avoids writing
+# the sidecar at 25 fps while still feeling live.
+try:
+    FRAME_SENSOR_INTERVAL = float(os.environ.get("OWLET_FRAME_SENSOR_INTERVAL") or "1")
+except ValueError:
+    FRAME_SENSOR_INTERVAL = 1.0
 # frame-info field offsets (little-endian) in the Owlet extended FRAMEINFO
 _FI_FLAGS = 2
 _FI_TEMP = 16
@@ -142,25 +154,26 @@ def _publish_cam_sensors(**fields) -> None:
 
 
 def _parse_frame_sensors(info: bytes, n: int) -> None:
-    """Pull temp/noise/motion/sound from the extended frame-info struct.
+    """Publish the live temperature that rides in every video frame's frame-info.
 
-    Throttled to CAM_SENSOR_INTERVAL so we're not writing the sidecar at 25fps.
+    Temperature is the one field the Owlet app trusts from frame-info — it reads
+    getTemperature() per frame for the instant on-screen readout (e1/c temp@0x10).
+    The frame also carries audio_db@0x18 but the app parses-and-discards it, so we
+    leave noise/humidity/brightness to the authoritative GET_REALTIME_DATA poll.
+    Throttled to FRAME_SENSOR_INTERVAL (~1s) so we don't write the sidecar at 25fps.
     """
     if not (CAM_SENSORS_PATH and SENSORS_ENABLED) or n < _FI_MIN_LEN:
         return
     now = time.time()
-    if now - _last_frame_sensor[0] < CAM_SENSOR_INTERVAL:
+    if now - _last_frame_sensor[0] < FRAME_SENSOR_INTERVAL:
         return
     _last_frame_sensor[0] = now
-    flags = info[_FI_FLAGS]
     temp = int.from_bytes(info[_FI_TEMP:_FI_TEMP + 4], "little", signed=True)
-    noise = int.from_bytes(info[_FI_AUDIO_DB:_FI_AUDIO_DB + 4], "little", signed=True)
-    _publish_cam_sensors(
-        temperature=temp,
-        noise=noise,
-        motion=1 if (flags & 0x02) else 0,
-        sound=1 if (flags & 0x08) else 0,
-    )
+    # Gate obviously-bad frames (the app validates with isValidCelsiusTemperature);
+    # a raw room temp of -20..60 °C is sane, anything else is a junk frame.
+    scaled = temp / TEMP_SCALE if TEMP_SCALE else temp
+    if -20 <= scaled <= 60:
+        _publish_cam_sensors(temperature=temp)
 
 
 def _realtime_thread(av, av_idx, stop_evt):
@@ -179,6 +192,14 @@ def _realtime_thread(av, av_idx, stop_evt):
     rbuf = create_string_buffer(64)
     payload = b"\x00\x00\x00\x00"
     while not stop_evt.is_set():
+        # While talk is being set up / active, do NOT touch avRecvIOCtrl — the
+        # talk handshake reads the camera's SPEAKERSTART ack (0x600b6) off the same
+        # channel queue, and avRecvIOCtrl pops one message per call. If we drain
+        # here we can steal the ack, making talk silently start the server too
+        # early. (Mirrors how _audio_probe parks during talk.)
+        if _TALKING.is_set():
+            stop_evt.wait(0.2)
+            continue
         try:
             with _AV_IO:
                 av.avSendIOCtrl(av_idx, IOTYPE_GET_REALTIME_REQ, payload, len(payload))
@@ -196,14 +217,222 @@ def _realtime_thread(av, av_idx, stop_evt):
                         humidity=int.from_bytes(b[4:8], "little", signed=True),
                         noise=int.from_bytes(b[8:12], "little", signed=True),
                         brightness=int.from_bytes(b[12:16], "little", signed=True),
-                        # only read rssi if the response actually carries byte 16
-                        wifi_rssi=(int.from_bytes(b[16:17], "little", signed=True)
-                                   if rc >= 17 else None),
+                        # wifi_rssi is a 4-byte LE int at offset 16 (confirmed
+                        # from the Owlet app: a0.c([B],0x10) reads a signed int32).
+                        wifi_rssi=(int.from_bytes(b[16:20], "little", signed=True)
+                                   if rc >= 20 else None),
                     )
                     break
         except Exception:  # noqa: BLE001
             pass
         stop_evt.wait(CAM_SENSOR_INTERVAL)
+
+
+def _vol_units(pct: int) -> int:
+    """Map a 0-100 percent to the camera's 0-5 device units, exactly like the
+    Owlet app's i1.i.a(): units = (pct*5 + 50) // 100, clamped to 0..5."""
+    pct = max(0, min(100, pct))
+    return max(0, min(5, (pct * 5 + 50) // 100))
+
+
+def _spk_vol_payload(pct: int) -> bytes:
+    """8-byte SET_SPK_VOL payload: int32 LE device-unit (0-5) at offset 0, rest 0."""
+    p = bytearray(8)
+    struct.pack_into("<i", p, 0, _vol_units(pct))
+    return bytes(p)
+
+
+def _volume_thread(av, av_idx, stop_evt):
+    """Watch VOL_FILE for a 0-100 percent and push SET_SPK_VOL to the camera when
+    it changes; apply OWLET_SPK_VOL once at start. Fully guarded — any error just
+    skips a round so it can never disturb the video pipeline."""
+    last = None
+
+    def _apply(pct: int):
+        nonlocal last
+        try:
+            payload = _spk_vol_payload(pct)
+            with _AV_IO:
+                rc = av.avSendIOCtrl(av_idx, IOTYPE_SET_SPK_VOL,
+                                     c_char_p(payload), len(payload))
+            log(f"[vol] speaker volume -> {pct}% (units={_vol_units(pct)}) rc={rc}")
+            last = pct
+        except Exception as e:  # noqa: BLE001
+            log(f"[vol] set failed: {e}")
+
+    if SPK_VOL_INITIAL >= 0:
+        _apply(SPK_VOL_INITIAL)
+    while not stop_evt.is_set():
+        if VOL_FILE:
+            try:
+                with open(VOL_FILE) as f:
+                    pct = int(f.read().strip())
+            except (OSError, ValueError):
+                pct = None
+            if pct is not None and pct != last:
+                _apply(pct)
+        stop_evt.wait(1.0)
+
+
+def _json_ioctl(av, av_idx, obj, want_resp=True, timeout=2.5):
+    """Send one audio-player JSON command via IOCTL 0x60105 (plain UTF-8 JSON, no
+    framing — exactly as the Owlet app). When want_resp, drain avRecvIOCtrl for the
+    matching 0x60105 reply and return the decoded dict; else just send. The whole
+    send+drain is under _AV_IO so it can't interleave with the sensor poller."""
+    body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    io_type = c_int(0)
+    rbuf = create_string_buffer(4096)
+    with _AV_IO:
+        rc = av.avSendIOCtrl(av_idx, IOTYPE_OWLET_JSON, c_char_p(body), len(body))
+        if rc < 0:
+            return {"error": f"send rc={rc}"}
+        if not want_resp:
+            return {"ok": True}
+        if not hasattr(av, "avRecvIOCtrl"):
+            return {"ok": True, "note": "no avRecvIOCtrl in lib"}
+        deadline = time.time() + timeout
+        acc = b""
+        while time.time() < deadline:
+            rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 4096, 500)
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                return {"error": f"session closed rc={rc}"}
+            if rc < 0:
+                continue  # timeout / not-ready this round — keep waiting
+            if io_type.value == IOTYPE_OWLET_JSON and rc > 0:
+                acc += rbuf.raw[:rc]
+                try:
+                    return json.loads(acc.decode("utf-8", "ignore"))
+                except ValueError:
+                    continue  # camera may deliver the JSON in pieces
+        return {"error": "no response (timeout)"}
+
+
+def _raw_ioctl(av, av_idx, req_io, payload: bytes, resp_io=None, timeout=2.0):
+    """Send a binary IOCTL on the client channel; if resp_io is given, drain
+    avRecvIOCtrl for that response io_type and return its raw bytes (else None).
+    Whole transaction under _AV_IO so it can't interleave with other drainers."""
+    io_type = c_int(0)
+    rbuf = create_string_buffer(1024)
+    with _AV_IO:
+        rc = av.avSendIOCtrl(av_idx, req_io, c_char_p(payload), len(payload))
+        if rc < 0:
+            return None if resp_io is None else {"error": f"send rc={rc}"}
+        if resp_io is None:
+            return b""
+        if not hasattr(av, "avRecvIOCtrl"):
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 1024, 500)
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                return None
+            if rc < 0:
+                continue
+            if io_type.value == resp_io and rc > 0:
+                return rbuf.raw[:rc]
+    return None
+
+
+def _handle_audio_cmd(av, av_idx, req: dict) -> dict:
+    """Translate a small UI request into the app's wire commands (audio player +
+    camera controls — all client-channel IOCTLs)."""
+    action = req.get("action")
+    # --- camera controls -----------------------------------------------------
+    if action == "led":
+        on = bool(req.get("on"))
+        payload = bytes([1, 1, 1, 0]) if on else bytes([0, 0, 0, 0])
+        _raw_ioctl(av, av_idx, IOTYPE_SET_LED, payload)
+        return {"ok": True, "led": "on" if on else "off"}
+    if action == "devinfo":
+        b = _raw_ioctl(av, av_idx, IOTYPE_DEVINFO_REQ, b"\x00\x00\x00\x00",
+                       resp_io=IOTYPE_DEVINFO_RESP, timeout=3.0)
+        if not isinstance(b, (bytes, bytearray)):
+            return {"error": "no devinfo response"}
+        def _ascii(off, ln):
+            return b[off:off + ln].split(b"\x00", 1)[0].decode("ascii", "ignore").strip()
+        info = {"model": _ascii(0, 16), "vendor": _ascii(16, 16)}
+        if len(b) >= 0x24:
+            v = int.from_bytes(b[0x20:0x24], "little", signed=False)
+            info["version"] = ".".join(str((v >> s) & 0xFF) for s in (24, 16, 8, 0))
+        if len(b) > 0x38:
+            info["firmware"] = _ascii(0x38, 16)
+        return {"ok": True, **info}
+    if action == "getvol":
+        b = _raw_ioctl(av, av_idx, IOTYPE_GET_SPK_MIC_VOL, b"\x00\x00\x00\x00",
+                       resp_io=IOTYPE_GET_SPK_MIC_VOL_RESP, timeout=3.0)
+        if not isinstance(b, (bytes, bytearray)) or len(b) < 4:
+            return {"error": "no volume response"}
+        units = int.from_bytes(b[0:4], "little", signed=True)
+        pct = max(0, min(100, (units * 100 + 2) // 5))   # app's i1.i.b()
+        return {"ok": True, "units": units, "percent": pct}
+    # --- native audio player -------------------------------------------------
+    if action == "sources":
+        return _json_ioctl(av, av_idx, {"audio_player_sources": {}})
+    if action == "state":
+        return _json_ioctl(av, av_idx, {"audio_player_state": {}})
+    if action == "reset":
+        return _json_ioctl(av, av_idx, {"audio_player_reset": {}}, want_resp=False)
+    if action in ("play", "pause", "stop", "next", "prev"):
+        uuids = req.get("uuids") or []
+        if uuids:
+            items = [{"uuid": u} for u in uuids]
+            _json_ioctl(av, av_idx,
+                        {"audio_player_queue": {"queue": {"items": items}}},
+                        want_resp=False)
+        if req.get("repeat") is not None or req.get("timeout_ms") is not None:
+            q = {}
+            if req.get("repeat") is not None:
+                q["repeat"] = bool(req["repeat"])
+            if req.get("timeout_ms") is not None:
+                q["timeout_ms"] = int(req["timeout_ms"])
+            _json_ioctl(av, av_idx, {"audio_player_set": {"player": {"queue": q}}},
+                        want_resp=False)
+        _json_ioctl(av, av_idx,
+                    {"audio_player_transport": {"player": {"action": action}}},
+                    want_resp=False)
+        return {"ok": True, "action": action}
+    return {"error": f"unknown action {action!r}"}
+
+
+def _audioplayer_thread(av, av_idx, stop_evt):
+    """Watch AUDIOCMD_FILE for a JSON request, run it on the camera's native audio
+    player, write the reply (with the request's id) to AUDIORESP_FILE. Inert until
+    a request appears, so it sends no IOCTL traffic by default."""
+    if not AUDIOCMD_FILE or not hasattr(av, "avSendIOCtrl"):
+        return
+    last_mtime = 0.0
+    while not stop_evt.is_set():
+        try:
+            mtime = os.path.getmtime(AUDIOCMD_FILE)
+        except OSError:
+            mtime = 0.0
+        if mtime and mtime != last_mtime:
+            last_mtime = mtime
+            # Don't run a command (which drains avRecvIOCtrl) while talk is being
+            # set up — it could steal the SPEAKERSTART ack. Talk clips are short.
+            while _TALKING.is_set() and not stop_evt.is_set():
+                stop_evt.wait(0.1)
+            try:
+                with open(AUDIOCMD_FILE) as f:
+                    req = json.load(f)
+            except (OSError, ValueError):
+                req = None
+            if isinstance(req, dict):
+                log(f"[lullaby] cmd: {req.get('action')}")
+                try:
+                    resp = _handle_audio_cmd(av, av_idx, req)
+                except Exception as e:  # noqa: BLE001
+                    resp = {"error": str(e)}
+                resp["id"] = req.get("id")
+                if AUDIORESP_FILE:
+                    try:
+                        tmp = AUDIORESP_FILE + ".tmp"
+                        with open(tmp, "w") as f:
+                            json.dump(resp, f)
+                        os.replace(tmp, AUDIORESP_FILE)
+                    except OSError:
+                        pass
+        stop_evt.wait(0.4)
 
 
 # --- audio probe (step 1: capture + report the camera's audio format) ---------
@@ -241,9 +470,63 @@ def _guess_audio(codec_id: int, flags: int) -> str:
 # the ADTS header to raw AAC access units, and send them; SPEAKERSTOP (849) on idle.
 IOTYPE_SPEAKERSTART = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART") or "848")
 IOTYPE_SPEAKERSTOP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTOP") or "849")
+# The camera's ack to SPEAKERSTART (the app waits for it before opening the AV
+# server). 0x600b6 = 393398, from the app (z0/o0.getResponseType).
+IOTYPE_SPEAKERSTART_RESP = int(os.environ.get("OWLET_IOTYPE_SPEAKERSTART_RESP") or "393398")
+# Talk-back transport. The Owlet app does NOT push speaker audio on the video
+# client channel — it opens an AV SERVER on a *free* channel of the live session
+# (avServStart2) and sends audio there; the camera connects back to receive. This
+# is why sending on the client channel was silently dropped. Set OWLET_TALK_LEGACY=1
+# to force the old client-channel avSendAudioData path.
+TALK_LEGACY = (os.environ.get("OWLET_TALK_LEGACY", "") or "").lower() in (
+    "1", "true", "yes", "on")
+try:
+    # seconds avServStart2 waits to accept the camera's inbound connection. The app
+    # uses 2; we allow a touch more headroom for slower P2P links (it returns
+    # immediately once the camera connects, so a larger value costs nothing on success).
+    AVSERV_TIMEOUT = int(os.environ.get("OWLET_AVSERV_TIMEOUT") or "4")
+except ValueError:
+    AVSERV_TIMEOUT = 4
+# Speaker volume IOCTL (IOTYPE_USER_IPCAM_SET_SPK_VOL_REQ = 0x60092 = 393362, from
+# the Owlet app). Payload: 8 bytes, a little-endian int32 "device unit" 0-5 at
+# offset 0. The app maps a 0-100% UI value to units via (pct*5 + 50) // 100.
+IOTYPE_SET_SPK_VOL = int(os.environ.get("OWLET_IOTYPE_SET_SPK_VOL") or "393362")
+# Extra camera controls (all client-channel request/response IOCTLs, from the app):
+IOTYPE_GET_SPK_MIC_VOL = 0x60096       # req; resp 0x60097 carries spk units i32@0
+IOTYPE_GET_SPK_MIC_VOL_RESP = 0x60097
+IOTYPE_SET_LED = 0x40082               # status indicator light; ON=[1,1,1,0] OFF=[0,0,0,0]
+IOTYPE_SET_LED_RESP = 0x40083
+IOTYPE_DEVINFO_REQ = 0x330             # model/vendor/firmware; resp 0x331
+IOTYPE_DEVINFO_RESP = 0x331
+# Live volume control: the web UI writes the desired 0-100 percent into this file;
+# _volume_thread watches it and pushes SET_SPK_VOL when it changes. OWLET_SPK_VOL
+# is an optional initial percent applied at connect (so a saved setting persists).
+VOL_FILE = os.environ.get("OWLET_VOL_FILE", "")
+try:
+    SPK_VOL_INITIAL = int(os.environ.get("OWLET_SPK_VOL") or "-1")
+except ValueError:
+    SPK_VOL_INITIAL = -1
+
+# Native audio player (camera's built-in soothing-sounds/lullabies). Driven by the
+# Owlet app's JSON-over-IOCTL protocol: IOTYPE_USER_IPCAM_OWLET_JSON_MSG_REQ =
+# 0x60105 = 393477, request AND response share that io_type, payload is plain
+# UTF-8 JSON with no binary framing. The web UI drops a small JSON request into
+# AUDIOCMD_FILE; _audioplayer_thread runs it and writes the camera's reply to
+# AUDIORESP_FILE. The camera self-reports its track UUIDs (audio_player_sources),
+# so no cloud is needed. No IOCTL is sent unless the user triggers an action, so
+# this is inert by default.
+IOTYPE_OWLET_JSON = int(os.environ.get("OWLET_IOTYPE_JSON_MSG") or "393477")
+AUDIOCMD_FILE = os.environ.get("OWLET_AUDIOCMD_FILE", "")
+AUDIORESP_FILE = os.environ.get("OWLET_AUDIORESP_FILE", "")
+# If the camera closes the AV session when it receives SPEAKERSTART (848), set
+# OWLET_SKIP_SPEAKERSTART=1. Some cameras open the speaker channel bi-directionally
+# from AUDIOSTART alone and reject a separate SPEAKERSTART IOCTL.
+SKIP_SPEAKERSTART = os.environ.get("OWLET_SKIP_SPEAKERSTART", "0") != "0"
 TALK_FIFO = os.environ.get("OWLET_TALK_FIFO", "")
 # Speaker frame format. Defaults match what the cam streams to us (AAC, 8kHz mono);
-# overridable, and auto-filled from the live audio probe when it reports.
+# The Owlet app hardcodes AAC-LC 0x88 / flags 0x02 for the speaker send and does
+# NOT probe for the talk path, so these are fixed (env override kept for diagnostics
+# only — the receive probe must never drive the SEND frameinfo).
 SPEAKER_CODEC_ID = int(os.environ.get("OWLET_SPEAKER_CODEC_ID") or "0x88", 0)
 SPEAKER_FLAGS = int(os.environ.get("OWLET_SPEAKER_FLAGS") or "0x02", 0)
 _PROBED_AUDIO: dict = {"codec_id": None, "flags": None}
@@ -255,26 +538,53 @@ _PROBED_AUDIO: dict = {"codec_id": None, "flags": None}
 # their own threads, unlocked.)
 _AV_IO = threading.Lock()
 
+# Half-duplex coordination. The Owlet camera has ONE P2P session and the TUTK
+# lib is NOT safe doing simultaneous audio RECV (the probe) and audio SEND (talk)
+# on the same channel — doing both corrupts/kills the session (video drops and
+# avSendAudioData can hang the process, needing a container restart). So while the
+# talk thread is actively sending speaker audio, the audio-receive probe PAUSES
+# (exactly how the Owlet app behaves: it stops listening while you hold talk).
+_TALKING = threading.Event()
 
-def _talk_frameinfo(ts_ms: int) -> bytes:
-    """16-byte FRAMEINFO_t for sent audio: codec_id@0, flags@2, timestamp@8
-    (the standard TUTK layout). codec/flags come from the live probe when known,
-    else the configured defaults."""
-    codec = _PROBED_AUDIO["codec_id"] if _PROBED_AUDIO["codec_id"] is not None else SPEAKER_CODEC_ID
-    flags = _PROBED_AUDIO["flags"] if _PROBED_AUDIO["flags"] is not None else SPEAKER_FLAGS
+
+def _talk_frameinfo() -> bytes:
+    """16-byte audio frame header, byte-for-byte matching the Owlet app's
+    e1.d.parseContent(short codec, byte flags, byte, byte, int ts):
+        [0:2]  codec_id   little-endian uint16   (0x0088 = AAC) — PINNED
+        [2]    flags       (0x02)                                — PINNED
+        [3]    0
+        [4]    0
+        [5:12] 0
+        [12:16] timestamp  little-endian uint32   = wall-clock ms, per frame
+
+    Two app-exact details that were wrong before and caused 'accepted but SILENT':
+    - timestamp is the 32-bit-truncated ABSOLUTE wall-clock ms (the app uses
+      (int)System.currentTimeMillis()), recomputed every frame — NOT a 0-based
+      per-clip counter. A jitter buffer keyed to wall-clock rejects frames whose
+      timestamps reset to ~0 each time talk starts.
+    - codec/flags are HARDCODED to 0x88/0x02 for the speaker send (the app does
+      not probe for the talk path: d1/f is constructed with 0x88, flags 0x02).
+      We must NOT let the receive-side audio probe override them."""
     fi = bytearray(16)
-    struct.pack_into("<H", fi, 0, codec & 0xFFFF)        # codec_id
-    fi[2] = flags & 0xFF                                  # flags
-    struct.pack_into("<I", fi, 8, ts_ms & 0xFFFFFFFF)    # timestamp
+    struct.pack_into("<H", fi, 0, SPEAKER_CODEC_ID & 0xFFFF)          # codec_id @0
+    fi[2] = SPEAKER_FLAGS & 0xFF                                      # flags    @2
+    struct.pack_into("<I", fi, 12, int(time.time() * 1000) & 0xFFFFFFFF)  # ts @12
     return bytes(fi)
 
 
-def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
-    """Parse ADTS AAC frames from buf, send each as a raw AAC access unit via
-    avSendAudioData. Returns leftover bytes (an incomplete trailing frame).
-    stats=[sent, rejected] is updated so the talk loop can log delivery."""
+def _send_adts(av, av_idx, buf: bytes, stats: list, stop_evt=None) -> bytes:
+    """Parse ADTS AAC frames from buf, strip the ADTS header, and send each as a
+    raw AAC-LC access unit via avSendAudioData — exactly what the app does (its
+    MediaCodec output is sent as bare AUs, never with ADTS). Returns leftover
+    bytes (an incomplete trailing frame). stats=[sent, rejected, dead_rc]."""
     i, n = 0, len(buf)
     while n - i >= 7:
+        # Bail immediately between frames if shutdown is requested — avClientStop
+        # is called before this, but avSendAudioData can still hang on a dead
+        # channel inside the C lib.  Checking here lets us exit after the current
+        # in-flight C call returns rather than queuing more frames onto a dead av_idx.
+        if stop_evt is not None and stop_evt.is_set():
+            return b""
         if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:   # ADTS sync 0xFFFx
             i += 1
             continue
@@ -285,68 +595,226 @@ def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
         if n - i < frame_len:
             break  # frame not fully buffered yet
         hdr = 7 if (buf[i + 1] & 0x01) else 9   # protection_absent -> 7-byte header
-        raw = buf[i + hdr:i + frame_len]
-        fi = _talk_frameinfo(int((time.time() - ts0) * 1000))
+        raw = buf[i + hdr:i + frame_len]        # raw AAC access unit (no ADTS)
+        fi = _talk_frameinfo()
         with _AV_IO:
             rc = av.avSendAudioData(av_idx, c_char_p(raw), len(raw), c_char_p(fi), len(fi))
         if rc is not None and rc < 0:
             stats[1] += 1
+            # Record a session-close so the talk loop can stop immediately
+            # instead of hammering a dead channel (which can hang the process).
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE) \
+                    and len(stats) > 2:
+                stats[2] = rc
+                return buf[i + frame_len:]
         else:
             stats[0] += 1
         i += frame_len
     return buf[i:]
 
 
-def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
-    """Play whatever AAC arrives on the talk FIFO out the camera's speaker."""
-    if not TALK_FIFO or not hasattr(av, "avSendAudioData"):
+def _ctrl_speaker(av, av_idx, ioctl, chan):
+    """Send a speaker control IOCTL (SPEAKERSTART/STOP) on the video CLIENT channel,
+    carrying the target speaker channel as a little-endian int32 in 8 bytes — the
+    exact payload the app builds (e1.d$b.parseContent(channel))."""
+    p = bytearray(8)
+    struct.pack_into("<i", p, 0, int(chan))
+    with _AV_IO:
+        return av.avSendIOCtrl(av_idx, ioctl, c_char_p(bytes(p)), 8)
+
+
+def _safe(fn):
+    """Run a teardown call, swallowing any error (best-effort cleanup)."""
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _await_ioctl_resp(av, av_idx, want, timeout):
+    """Briefly drain avRecvIOCtrl on the client channel for a specific response
+    io_type (e.g. the SPEAKERSTART ack). Best-effort; returns True if seen."""
+    if not hasattr(av, "avRecvIOCtrl"):
+        return False
+    io_type = c_int(0)
+    rbuf = create_string_buffer(1024)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _AV_IO:
+            rc = av.avRecvIOCtrl(av_idx, byref(io_type), rbuf, 1024, 300)
+        if rc < 0:
+            continue
+        if io_type.value == want:
+            return True
+    return False
+
+
+def _talk_thread(av: CDLL, iotc: CDLL, session: int, av_idx: int,
+                 stop_evt: threading.Event) -> None:
+    """Play whatever AAC arrives on the talk FIFO out the camera's speaker.
+
+    Talk-back uses the AV-SERVER model the Owlet app uses: get a free channel on
+    the live session, tell the camera (SPEAKERSTART carrying that channel), open an
+    avServStart2 server on it, and push audio there. Sending on the video client
+    channel (the old behavior, OWLET_TALK_LEGACY=1) is silently dropped by the cam."""
+    if not TALK_FIFO:
+        log("[talk] OWLET_TALK_FIFO not set — talk/speaker disabled")
         return
+    if not hasattr(av, "avSendAudioData"):
+        log("[talk] avSendAudioData not found in TUTK lib — talk/speaker disabled "
+            "(older lib build; two-way audio requires a lib with avSendAudioData)")
+        return
+    server_ok = (not TALK_LEGACY
+                 and hasattr(av, "avServStart2")
+                 and hasattr(iotc, "IOTC_Session_Get_Free_Channel"))
+    if not server_ok and not TALK_LEGACY:
+        log("[talk] lib lacks avServStart2/IOTC_Session_Get_Free_Channel — "
+            "falling back to legacy client-channel send (may be silent)")
+    log(f"[talk] transport = {'AV-server (app-style)' if server_ok else 'legacy client-channel'}")
     try:
         # O_RDWR so the FIFO never EOFs / blocks when no writer is connected.
         fd = os.open(TALK_FIFO, os.O_RDWR | os.O_NONBLOCK)
     except OSError as e:  # noqa: BLE001
         log(f"[talk] cannot open {TALK_FIFO}: {e}")
         return
+    log(f"[talk] FIFO open (fd={fd}) — ready to receive audio on {TALK_FIFO}")
     buf = b""
     speaking = False
+    send_idx = -1            # the av index to push audio on (server idx or av_idx)
+    spk_chan = -1            # the speaker channel we opened (server model)
+    spk_serv_idx = -1        # the avServStart2 return — needed for avServStop teardown
     last_audio = 0.0
-    ts0 = time.time()
-    stats = [0, 0]   # [sent, rejected] avSendAudioData results
+    stats = [0, 0, 0]        # [sent, rejected, dead_rc] avSendAudioData results
+    last_alive = time.monotonic()
 
-    def _spk(ioctl):
-        sp = smsg_av_stream(AV_CHANNEL)
+    def _open_speaker():
+        """Start the speaker channel; return (send_idx, chan) or (-1, -1).
+
+        Order matches the app EXACTLY: free channel -> SPEAKERSTART(chan) ->
+        WAIT for the camera's 0x600b6 ack (the camera only connects back to our
+        server channel after this) -> avServStart2. avServStart2 is GATED on the
+        ack: starting the server before the camera is listening = silent audio."""
+        nonlocal spk_chan, spk_serv_idx
+        if not server_ok:
+            # legacy: just SPEAKERSTART on the client channel and send there
+            rc = 0 if SKIP_SPEAKERSTART else _ctrl_speaker(
+                av, av_idx, IOTYPE_SPEAKERSTART, AV_CHANNEL)
+            log(f"[talk] (legacy) SPEAKERSTART rc={rc}")
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                return -1, -1
+            return av_idx, AV_CHANNEL
+        # AV-server model (matches the app). CRITICAL ORDERING: the camera connects
+        # back to our server channel immediately after it ACKs SPEAKERSTART, so the
+        # server must be LISTENING first. We send SPEAKERSTART and then call
+        # avServStart2 right away (it blocks up to AVSERV_TIMEOUT accepting the
+        # camera's connection). Waiting for the 0x600b6 ack before avServStart2 let
+        # the camera grab the channel first -> avServStart2 returned -20027
+        # (AV_ER_IOTC_CHANNEL_IN_USED). We do NOT wait for the ack.
         with _AV_IO:
-            return av.avSendIOCtrl(av_idx, ioctl, c_char_p(sp), len(sp))
+            chan = iotc.IOTC_Session_Get_Free_Channel(session)
+        if chan < 0:
+            log(f"[talk] IOTC_Session_Get_Free_Channel rc={chan} — no free channel")
+            return -1, -1
+        for attempt in (1, 2):
+            rc = _ctrl_speaker(av, av_idx, IOTYPE_SPEAKERSTART, chan)
+            log(f"[talk] SPEAKERSTART(chan={chan}) rc={rc} (attempt {attempt})")
+            if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
+                log("[talk] SPEAKERSTART closed the session — aborting talk")
+                break
+            # start the server NOW (no ack wait) — it accepts the camera's inbound
+            # connection within AVSERV_TIMEOUT seconds.
+            sidx = av.avServStart2(session, b"", b"", AVSERV_TIMEOUT, 0, chan)
+            log(f"[talk] avServStart2(chan={chan}) -> serv_idx={sidx}")
+            if sidx >= 0:
+                spk_chan = chan
+                spk_serv_idx = sidx
+                return sidx, chan
+            if sidx == AV_ER_IOTC_CHANNEL_IN_USED and attempt == 1:
+                # the camera grabbed the channel before our server was up — close
+                # that inbound channel and retry once so the server can own it.
+                log("[talk] channel busy (-20027) — releasing + retrying")
+                with _AV_IO:
+                    _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, chan))
+                time.sleep(0.25)
+                continue
+            break
+        with _AV_IO:
+            _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, chan))
+        return -1, -1
+
+    def _close_speaker():
+        """Tear down the speaker. For a started server the app uses
+        avServStop(serverIdx) (NOT avServExit) then SPEAKERSTOP then Channel_OFF."""
+        nonlocal spk_chan, spk_serv_idx
+        if server_ok and spk_chan >= 0:
+            if spk_serv_idx >= 0 and hasattr(av, "avServStop"):
+                with _AV_IO:
+                    _safe(lambda: av.avServStop(spk_serv_idx))
+            _safe(lambda: _ctrl_speaker(av, av_idx, IOTYPE_SPEAKERSTOP, spk_chan))
+            with _AV_IO:
+                _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, spk_chan))
+            spk_chan = -1
+            spk_serv_idx = -1
+        elif not server_ok:
+            _safe(lambda: _ctrl_speaker(av, av_idx, IOTYPE_SPEAKERSTOP, AV_CHANNEL))
 
     try:
         while not stop_evt.is_set():
+            if time.monotonic() - last_alive > 30:
+                log(f"[talk] alive, listening on FIFO (speaking={speaking})")
+                last_alive = time.monotonic()
             try:
                 chunk = os.read(fd, 8192)
             except BlockingIOError:
                 chunk = b""
             if chunk:
+                log(f"[talk] read {len(chunk)} bytes from FIFO")
                 if not speaking:
-                    rc = _spk(IOTYPE_SPEAKERSTART)
+                    # Pause the audio-RECV probe while talking (matches the app;
+                    # also avoids any client/server channel contention on setup).
+                    _TALKING.set()
+                    time.sleep(0.06)
+                    send_idx, _ = _open_speaker()
+                    if send_idx < 0:
+                        log("[talk] could not open speaker — dropping this clip")
+                        _TALKING.clear()
+                        buf = b""
+                        # drain the FIFO so we don't immediately retry on stale data
+                        try:
+                            while os.read(fd, 8192):
+                                pass
+                        except BlockingIOError:
+                            pass
+                        continue
+                    log(f"[talk] speaker ON (send_idx={send_idx} "
+                        f"codec=0x{SPEAKER_CODEC_ID:04x} flags=0x{SPEAKER_FLAGS:02x})")
                     speaking = True
-                    ts0 = time.time()
-                    stats[0] = stats[1] = 0
-                    cid = _PROBED_AUDIO["codec_id"]
-                    log(f"[talk] speaker on (start ioctl={IOTYPE_SPEAKERSTART} rc={rc}, "
-                        f"codec=0x{(cid if cid is not None else SPEAKER_CODEC_ID):04x})")
-                buf = _send_adts(av, av_idx, buf + chunk, ts0, stats)
+                    stats[0] = stats[1] = stats[2] = 0
+                buf = _send_adts(av, send_idx, buf + chunk, stats, stop_evt=stop_evt)
                 last_audio = time.monotonic()
+                if stats[2]:
+                    log(f"[talk] camera closed the channel mid-send (rc={stats[2]}); "
+                        f"stopping talk")
+                    _close_speaker()
+                    speaking = False
+                    _TALKING.clear()
+                    continue
             else:
                 if speaking and time.monotonic() - last_audio > 0.8:
-                    _spk(IOTYPE_SPEAKERSTOP)
+                    _close_speaker()
                     speaking = False
                     buf = b""
+                    _TALKING.clear()
                     log(f"[talk] speaker off (idle) — sent {stats[0]} frames, "
                         f"{stats[1]} rejected")
                 time.sleep(0.02)
     finally:
-        if speaking:
+        _TALKING.clear()
+        # Tear the speaker channel down unless the whole session is already being
+        # stopped (avServExit/avSendIOCtrl on a stopped session can hang).
+        if speaking and not stop_evt.is_set():
             try:
-                _spk(IOTYPE_SPEAKERSTOP)
+                _close_speaker()
             except Exception:  # noqa: BLE001
                 pass
         try:
@@ -374,6 +842,12 @@ def _audio_probe(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
     started = time.time()
     try:
         while not stop_evt.is_set():
+            # Half-duplex: while the talk thread is pushing speaker audio, STOP
+            # receiving audio. Simultaneous send+recv on the cam's single AV
+            # channel corrupts the session (drops video / wedges the process).
+            if _TALKING.is_set():
+                time.sleep(0.05)
+                continue
             try:
                 rc = av.avRecvAudioData(av_idx, abuf, AUDIO_BUF, ainfo, FINFO_BUF, byref(aidx))
             except Exception as e:  # noqa: BLE001
@@ -587,6 +1061,16 @@ def stream_once(uid: str, sec_mode: int) -> int:
              [c_int, c_char_p, c_int, c_char_p, c_int, POINTER(c_uint)])
     _set_sig(av, "avSendAudioData", c_int,
              [c_int, c_char_p, c_int, c_char_p, c_int])
+    # Two-way talk uses the AV-SERVER model (the app does the same): open a server
+    # on a free channel of the live session and push audio there, NOT on the video
+    # client channel. Bind the calls the talk path needs (guarded — older libs may
+    # lack some, in which case talk falls back to the legacy client-channel send).
+    _set_sig(iotc, "IOTC_Session_Get_Free_Channel", c_int, [c_int])
+    _set_sig(iotc, "IOTC_Session_Channel_OFF", c_int, [c_int, c_int])
+    _set_sig(av, "avServStart2", c_int,
+             [c_int, c_char_p, c_char_p, c_int, c_int, c_int])
+    _set_sig(av, "avServExit", c_int, [c_int, c_int])
+    _set_sig(av, "avServStop", c_int, [c_int])
     if tutk is not None:
         _set_sig(tutk, "TUTK_SDK_Set_License_Key", c_int, [c_char_p])
         _set_sig(tutk, "TUTK_SDK_Set_Region", c_int, [c_int])
@@ -618,6 +1102,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
     audio_thr = None
     talk_thr = None
     sensors_thr = None
+    vol_thr = None
+    player_thr = None
     try:
         sid = iotc.IOTC_Get_SessionID()
         log(f"IOTC_Get_SessionID -> {sid}")
@@ -668,14 +1154,45 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 log(f"[audio] probe start failed: {e}")
 
         # Talk / sound-playback: play AAC arriving on the talk FIFO out the speaker.
+        has_send = hasattr(av, "avSendAudioData")
+        log(f"[talk] avSendAudioData={'found' if has_send else 'NOT FOUND in lib'} "
+            f"TALK_FIFO={TALK_FIFO!r}")
         if TALK_FIFO:
             try:
                 talk_thr = threading.Thread(
-                    target=_talk_thread, args=(av, av_idx, audio_stop), daemon=True)
+                    target=_talk_thread, args=(av, iotc, session, av_idx, audio_stop),
+                    daemon=True)
                 talk_thr.start()
-                log(f"[talk] listening for audio on {TALK_FIFO}")
+                log(f"[talk] thread started — listening on {TALK_FIFO}")
             except Exception as e:  # noqa: BLE001
                 log(f"[talk] start failed: {e}")
+
+        # Speaker volume: watch the volume control file and push SET_SPK_VOL
+        # (0x60092) to the camera when it changes. Opt-in — only runs if a volume
+        # file or an initial OWLET_SPK_VOL is configured, so default behavior is
+        # unchanged. Sends a benign config IOCTL (not a channel op), serialized by
+        # _AV_IO like every other IOCTL.
+        if (VOL_FILE or SPK_VOL_INITIAL >= 0) and hasattr(av, "avSendIOCtrl"):
+            try:
+                vol_thr = threading.Thread(
+                    target=_volume_thread, args=(av, av_idx, audio_stop), daemon=True)
+                vol_thr.start()
+                log(f"[vol] speaker-volume control active (file={VOL_FILE!r})")
+            except Exception as e:  # noqa: BLE001
+                log(f"[vol] start failed: {e}")
+
+        # Native audio player (camera built-in lullabies). Inert until the UI
+        # drops a command in AUDIOCMD_FILE — sends no IOCTL traffic by default.
+        if AUDIOCMD_FILE and hasattr(av, "avSendIOCtrl"):
+            try:
+                player_thr = threading.Thread(
+                    target=_audioplayer_thread, args=(av, av_idx, audio_stop),
+                    daemon=True)
+                player_thr.start()
+                log(f"[lullaby] native audio-player control active "
+                    f"(file={AUDIOCMD_FILE!r})")
+            except Exception as e:  # noqa: BLE001
+                log(f"[lullaby] start failed: {e}")
 
         # Room sensors: poll the GetRealtimeData IOCTL for humidity + brightness
         # (temp/noise/motion/sound already ride the frame info).
@@ -739,9 +1256,12 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 av.avClientStop(av_idx)
             except Exception:  # noqa: BLE001
                 pass
-        for thr in (audio_thr, talk_thr, sensors_thr):
+        for thr in (audio_thr, talk_thr, sensors_thr, vol_thr, player_thr):
             if thr is not None:
                 thr.join(timeout=3)
+                if thr.is_alive():
+                    log(f"[warn] {thr.name!r} still alive after 3s — possible thread "
+                        "leak (avSendAudioData/avSendIOCtrl may be hung in C lib)")
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
         if session >= 0:

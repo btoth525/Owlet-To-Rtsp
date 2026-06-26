@@ -22,10 +22,16 @@ No phone. No Android emulator. No cloud relay. It talks to the camera directly o
 ## What you get
 
 - 🦉 **A single container** — drop in your Owlet login, get `rtsp://<host>:8554/owlet`.
-- 🌐 **A friendly web UI** — status dashboard, in‑browser APK upload, one‑click "Connect & Diagnose," live logs.
+- 🌐 **A friendly web UI** — status dashboard, in‑browser APK upload, one‑click "Add & connect," live logs.
 - 🏠 **100% local video** — once connected, frames go camera → bridge directly over your LAN; they never touch Owlet's or ThroughTek's servers.
+- 🎙️ **Two‑way audio** — hold‑to‑talk into the room (from any browser), play uploaded MP3/WAV/AAC files, or trigger the camera's **built‑in lullabies and soothing sounds** (with a hardware sleep timer) — all reverse‑engineered from the app, byte‑for‑byte.
+- 🌡️ **Room sensors → Home Assistant** — temperature (live, per video frame), humidity, sound level, brightness, Wi‑Fi RSSI, auto‑published via MQTT discovery.
+- 🎛️ **Camera controls** — speaker volume (0–100 %, with live read‑back), status indicator light on/off, model/firmware info.
+- 📹 **Multiple cameras** — add as many cams as you have, each with its own RTSP stream.
 - 🔁 **Self‑healing** — keeps the camera session alive 24/7 and reconnects automatically after a Frigate restart or a power cut.
 - 🚫 **Nothing proprietary shipped** — you supply your own copy of the Owlet app; the bridge extracts the TUTK libraries from it for you.
+
+> Everything the bridge does is replicated from the official Owlet app's own protocol (decompiled and verified) — no cloud relay, no emulator. The one exception is **motion/sound *push* alerts**, which the app delivers via Firebase cloud messaging, not the local camera link — so those can't be reproduced locally (the live **sound level** is published instead, which you can threshold in Home Assistant).
 
 ---
 
@@ -46,11 +52,13 @@ The Owlet Cam speaks **ThroughTek / Kalay (TUTK)** — the same P2P video platfo
         │   • IOTC_Connect_ByUIDEx            (authKey)
         │   • avClientStartEx                 (DTLS AV login)
         │   • avRecvFrameData2 loop ─ raw H.264 → stdout
+        │   • two‑way talk: avServStart2 on free channel ─ AAC → speaker
+        │   • room sensors: temp per frame + GET_REALTIME_DATA IOCTL
         ▼
   ffmpeg + go2rtc ──▶  RTSP :8554  ·  WebRTC :8555  ·  HLS / preview UI :1984
 ```
 
-Everything is configured in the browser. The **Connect & Diagnose** button runs the *real* Owlet login, fetches the camera's Kalay credentials, and streams every step to a live log.
+Everything is configured in the browser. The **Add & connect** button runs the *real* Owlet login, fetches the camera's Kalay credentials, and streams every step to a live log.
 
 ---
 
@@ -91,19 +99,21 @@ The proprietary ThroughTek `.so` libraries aren't shipped — you supply your ow
 
 > These libraries are Android binaries linked against Bionic libc, so glibc can't load them. The image runs a **Termux (Bionic) userspace** so they load on a normal x86‑64 Linux kernel — no Android, no `binder`/`ashmem`, no privileged mode.
 
-### 4 · Sign in
+### 4 · Sign in and add your camera
 
 In the control panel:
-1. Enter your Owlet **email / password** and **region**.
-2. Enter your camera **DSN** — it looks like **`OCD…`** (that's a **capital letter O**, not a zero). Find it in the Owlet app under the camera, or on the camera base.
-3. Click **Connect & Diagnose** → it logs in and auto‑fills the camera UID / AuthKey / password.
-4. Click **Save & (re)start stream.**
+
+1. Enter your Owlet **email / password** and **region**, then click **Save account**.
+2. Enter your camera **DSN** — it looks like **`OCD…`** (that's a **capital letter O**, not a zero). Find it in the Owlet app under the camera, or on the camera base. Give it a name (e.g. `nursery`).
+3. Click **＋ Add & connect** — it logs in, fetches the camera UID / AuthKey, and starts the stream automatically.
 
 ### 5 · Use it
 
 - Control panel: `http://<unraid-ip>:8088`
 - Video UI / preview: `http://<unraid-ip>:1985`
-- **RTSP: `rtsp://<unraid-ip>:18554/owlet`** ← point Frigate here.
+- **RTSP: `rtsp://<unraid-ip>:18554/<camera-name>`** ← point Frigate here.
+
+> **Two‑way talk requires HTTPS.** The browser's microphone API only works on a secure origin. Open the panel on `https://` (self‑signed cert — accept the warning once) and the 🎤 hold‑to‑talk button becomes active.
 
 ---
 
@@ -115,13 +125,13 @@ Add the bridge as a go2rtc stream, then a record‑only camera. **Disable birdse
 go2rtc:
   streams:
     Owlet_Cam:
-      - rtsp://<unraid-ip>:18554/owlet      # the bridge
+      - rtsp://<unraid-ip>:18554/nursery      # the bridge (use your camera name)
 
 cameras:
   Owlet_Cam:
     enabled: true
     birdseye:
-      enabled: false                        # don't decode 1440p just for the mosaic
+      enabled: false                          # don't decode 1440p just for the mosaic
     ffmpeg:
       inputs:
         - path: rtsp://127.0.0.1:8554/Owlet_Cam
@@ -133,7 +143,7 @@ cameras:
       enabled: true
 ```
 
-> The Owlet stream is **video‑only** (no audio), so don't add an `audio` role. The first connect takes ~10s (P2P + DTLS), so Frigate's ffmpeg may retry once — that's normal.
+> The Owlet stream is **video‑only** (no audio track in the RTSP stream), so don't add an `audio` role. The first connect takes ~10 s (P2P + DTLS handshake), so Frigate's ffmpeg may retry once — that's normal.
 
 ---
 
@@ -155,11 +165,66 @@ The `PUBLIC_*` vars just tell the UI which host ports you mapped, so the copy‑
 
 ---
 
+## Features in detail
+
+### Two‑way audio (talk‑back)
+
+Open the **🎙️ Talk & sounds** card. The **🎤 Hold to talk** button captures your microphone in real time, encodes it to AAC‑LC 8 kHz mono (matching the format the Owlet app uses), and pushes it to the camera's speaker over the Kalay AV server channel.
+
+The exact transport, reverse‑engineered from the app:
+
+1. `IOTC_Session_Get_Free_Channel` — pick a free channel on the live session
+2. `avServExit(session, chan)` — clear any lingering AV state on that channel
+3. Send `SPEAKERSTART` IOCTL (0x350) carrying the channel number
+4. Wait for the camera's `0x600b6` ack
+5. `avServStart2(session, "", "", timeout, 0, chan)` — accept the camera's inbound connection
+6. Stream AAC frames via `avSendAudioData`
+
+### Audio files & lullabies
+
+- **Play a file** — drag MP3/WAV/AAC/OGG files onto the drop zone, then click to play. The file is transcoded to AAC‑LC 8 kHz and sent to the camera in real time.
+- **Sleep timer** — hardware‑enforced by the camera (15/30/45/60/120 min).
+- **Loop** — repeats the current file or lullaby.
+- **Built‑in camera sounds** — click **🔄 Load camera sounds** to list the soothing sounds stored on the camera itself (the same ones the Owlet app uses). Click any to play; **⏹ Stop** to silence.
+
+### Room sensors
+
+The bridge publishes five sensor values:
+
+| Sensor | Source | Update rate |
+|---|---|---|
+| Temperature | Embedded in every video frame | ~1 s (live) |
+| Humidity | `GET_REALTIME_DATA` IOCTL | every 2 s |
+| Sound level (dB) | `GET_REALTIME_DATA` IOCTL | every 2 s |
+| Brightness | `GET_REALTIME_DATA` IOCTL | every 2 s |
+| Wi‑Fi RSSI | `GET_REALTIME_DATA` IOCTL | every 2 s |
+
+Temperature rides every single video frame in the extended frame‑info struct — it updates at the camera's frame rate and is throttled to ~1 s writes so the sidecar isn't written 25× per second.
+
+### Home Assistant / MQTT
+
+Enable MQTT in the **🏠 Home Assistant** card. Every sensor above is published with Home Assistant MQTT discovery — entities appear automatically in your HA instance (no manual YAML). Temperatures are published in °F.
+
+### Camera controls
+
+All controls are in the **🎙️ Talk & sounds** card:
+
+- **🔊 Speaker volume** — drag the slider (0–100 %). The current device volume is read back from the camera on connect and shown next to the slider.
+- **💡 Status light** — toggle the camera's blue indicator LED on or off.
+- **ℹ️ Camera info** — reads model, vendor, and firmware version from the camera in real time.
+
+### Vitals / Smart Sock
+
+Open the **🩺 Sensors & vitals** card and click **Probe my devices**. The bridge pulls heart rate, oxygen, and other Smart Sock vitals from Owlet's cloud and shows them alongside the camera's room sensors. Once probed, readings refresh automatically.
+
+---
+
 ## How we built this — the findings
 
-Owlet ships no public API or RTSP. Getting here meant reverse‑engineering the Owlet Android app and the ThroughTek libraries it bundles. The notable pieces:
+Owlet ships no public API or RTSP. Getting here meant reverse‑engineering the Owlet Android app and the ThroughTek libraries it bundles.
 
 ### 1 · The camera is Kalay, the sock is Ayla
+
 Owlet's **Smart Sock** lives on the Ayla IoT cloud; the **Cam** is a ThroughTek Kalay device that isn't in the Ayla device list at all. The login chain that yields the camera's P2P credentials:
 
 | Step | Endpoint | Returns |
@@ -170,9 +235,11 @@ Owlet's **Smart Sock** lives on the Ayla IoT cloud; the **Cam** is a ThroughTek 
 | **Camera key (KMS)** | **`camera‑kms.owletdata.com/kms/{DSN}`** (Firebase `idToken`) | **`tutkid` (UID), `authKey`, `password`** |
 
 ### 2 · Running Android `.so` libraries on x86‑64 without Android
+
 ThroughTek's `.so` files are linked to Android's **Bionic** libc, so glibc refuses them. Instead of emulating Android, the image is built `FROM termux/termux-docker:x86_64` — a Bionic userspace — so the libraries `dlopen` cleanly on the normal Unraid kernel.
 
 ### 3 · The exact TUTK call sequence (recovered by decompiling the app)
+
 The newer Kalay SDK is **licensed** and **region‑locked** and hangs forever if you skip either. Decompiling `com.owlet.tutk.AndroidTutkSdk` gave the precise order:
 
 ```
@@ -187,13 +254,19 @@ loop avRecvFrameData2() → H.264
 ```
 
 ### 4 · The struct ABI — read straight out of the libraries
+
 The connect/AV‑login calls take C structs whose layout jadx can't recover (it alphabetises Java fields). So the offsets were **disassembled directly** from the Owlet `libIOTCAPIs.so` / `libAVAPIs.so`. Two details made or broke the whole thing:
 
 - **`St_IOTCConnectInput` (160 bytes):** the real `IOTC_Connect_ByUIDEx` first does `cmp [struct], 0xA0` — the struct **must begin with its own size, `160`**, or it returns `-46` instantly. The AuthKey is exactly **8 chars** at offset `0x08`.
 - **`St_AVClientStartInConfig` (64 bytes):** same trick — a leading `structSize` of `64`, with account/password as pointers.
 
 ### 5 · The camera demands DTLS at the AV layer
+
 The simple `avClientStart2` login is rejected with `‑20049` (a DTLS‑class error). The Dream Duo requires the encrypted **`avClientStartEx`** login the app uses — security mode **Auto** negotiates DTLS and connects on the first try.
+
+### 6 · Two‑way audio — the AV server model
+
+Sending audio on the video client channel is silently dropped. The app opens a **separate AV server** channel (`avServStart2`) on the live session, which the camera dials back into after receiving the `SPEAKERSTART` IOCTL. The critical step that was missing from every prior attempt: the app calls `avServExit(session, chan)` to clear stale AV state on the free channel **before** calling `avServStart2` — without it, `avServStart2` returns `‑20027 (AV_ER_IOTC_CHANNEL_IN_USED)` every time. Recovered from `i1/m.smali` in the decompiled APK.
 
 ---
 
@@ -208,6 +281,9 @@ Everything's set in the web UI; these env vars override or tune it:
 | `OWLET_AV_SECURITY_MODE` | *(auto)* | pin `0` Simple / `1` Dtls / `2` Auto |
 | `OWLET_REGION_CODE` | `3` | TUTK region (US = 3) |
 | `OWLET_IOTYPE_START` | `511` | start‑video IOCTL |
+| `OWLET_SENSOR_INTERVAL` | `2` | seconds between GET_REALTIME_DATA polls |
+| `OWLET_SPK_VOL` | *(unset)* | initial speaker volume 0–100 % applied at connect |
+| `OWLET_TEMP_SCALE` | `1` | divide raw temperature by this — set `10` if temp reads ~10× too high |
 
 ---
 
@@ -223,6 +299,9 @@ Everything's set in the web UI; these env vars override or tune it:
 | **Stream pops in and out** | Close the **Owlet app on all phones** — the cam allows one session and they fight. Keep `OWLET_KEEPALIVE` on. Check `docker exec owlet-bridge-native tail -50 /config/tutk.log`. |
 | **High CPU in Frigate** | Disable **birdseye** for the Owlet camera — it was decoding the full 1440p feed for the mosaic. |
 | **`MISSING …libIOTCAPIs.so`** | Upload your Owlet APK in the **TUTK libraries** card (or drop it in the config folder). |
+| **🎤 mic button is greyed out** | The browser requires HTTPS for microphone access. Open the panel on `https://` and accept the self‑signed cert warning. |
+| **Talk opens but no sound** | Check the log for `avServStart2` return code. If it shows `‑20027` update to the latest image. |
+| **Temperature reads ~10× too high** | Set `OWLET_TEMP_SCALE=10` — some firmware revisions use tenths‑of‑°C. |
 
 ---
 
@@ -233,6 +312,10 @@ Everything's set in the web UI; these env vars override or tune it:
 **Can an Owlet app update break it?** Not by itself — the bridge uses cached creds + the libraries you extracted, not the live app. Server‑side auth changes or camera firmware *could* eventually require re‑extracting from a newer APK (same maintenance model as docker‑wyze‑bridge). Keep a copy of your working `.apkm`.
 
 **Does it survive a reboot / power loss?** Yes — `--restart unless-stopped` brings the container back and the keepalive reconnects the camera automatically.
+
+**Can I add multiple cameras?** Yes — add each one by DSN in the Cameras card. Each gets its own RTSP stream at `rtsp://<host>:8554/<camera-name>`.
+
+**Why no motion alerts?** The Owlet app delivers motion and sound *push* alerts via Firebase Cloud Messaging — a cloud service, not the local camera link. These can't be reproduced locally. Use the live **sound level** sensor in Home Assistant to build automations instead.
 
 ---
 

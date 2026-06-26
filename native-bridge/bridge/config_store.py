@@ -80,7 +80,7 @@ ACCOUNT_DEFAULTS: dict[str, str] = {
 
 # Per-camera settings.
 CAMERA_FIELDS = ["name", "camera_dsn", "uid", "authkey", "av_password",
-                 "av_security_mode"]
+                 "av_security_mode", "skip_speakerstart", "spk_vol"]
 CAMERA_DEFAULTS: dict[str, str] = {k: "" for k in CAMERA_FIELDS}
 
 # Home Assistant / MQTT — settable in the UI (env vars still work as defaults).
@@ -281,6 +281,10 @@ def camera_env(account: dict, cam: dict) -> dict[str, str]:
     }
     if cam.get("av_security_mode"):
         env["OWLET_AV_SECURITY_MODE"] = cam["av_security_mode"]
+    if cam.get("skip_speakerstart"):
+        env["OWLET_SKIP_SPEAKERSTART"] = "1"
+    if str(cam.get("spk_vol", "")).strip() != "":
+        env["OWLET_SPK_VOL"] = str(cam["spk_vol"]).strip()
     return env
 
 
@@ -315,10 +319,14 @@ def _exec_source(name: str) -> str:
         'set -a; [ -f %(e)s ] && . %(e)s; '
         'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
+        'V="$D/owlet-vol-%(n)s"; '
+        '[ -n "$OWLET_SPK_VOL" ] && printf "%%s" "$OWLET_SPK_VOL" > "$V"; '
+        'C="$D/owlet-audiocmd-%(n)s"; R="$D/owlet-audioresp-%(n)s"; rm -f "$C" "$R"; '
         'mkdir -p /config/vitals 2>/dev/null; '
-        'export OWLET_TALK_FIFO="$T" '
+        'export OWLET_TALK_FIFO="$T" OWLET_VOL_FILE="$V" '
+        'OWLET_AUDIOCMD_FILE="$C" OWLET_AUDIORESP_FILE="$R" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
-        'trap "rm -f $T" EXIT; '
+        'trap "rm -f $T $V $C $R" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
@@ -415,6 +423,25 @@ def talk_fifo_path(name: str) -> str:
     exec creates (${TMPDIR:-/tmp}/owlet-talk-<name>)."""
     tmp = os.environ.get("TMPDIR") or "/tmp"
     return os.path.join(tmp, "owlet-talk-" + name)
+
+
+def vol_file_path(name: str) -> str:
+    """The file the UI writes the desired 0-100 speaker volume into; tutk_client's
+    _volume_thread watches it (${TMPDIR:-/tmp}/owlet-vol-<name>)."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-vol-" + name)
+
+
+def audiocmd_file_path(name: str) -> str:
+    """Native audio-player request file the UI writes JSON commands into."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-audiocmd-" + name)
+
+
+def audioresp_file_path(name: str) -> str:
+    """Native audio-player response file tutk_client writes the camera reply into."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-audioresp-" + name)
 
 
 # Per-camera room-sensor sidecar (temp/humidity/noise/brightness/motion/sound),

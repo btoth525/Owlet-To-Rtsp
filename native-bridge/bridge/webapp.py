@@ -848,11 +848,30 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
     (ok, message, proc). Rate is OWLET_TALK_RATE (default 8000, the cam's mic
     rate) — set to match the camera's probed speaker rate if no audio plays."""
     fifo = cs.talk_fifo_path(camera)
+    log(f"[talk] FIFO={fifo} exists={os.path.exists(fifo)}")
     if not os.path.exists(fifo):
         return False, "camera isn't streaming yet — start its stream first", None
+    # Quick check: can we open the FIFO for writing without blocking?
+    # If tutk_client's _talk_thread is NOT running (or FIFO has no reader),
+    # O_WRONLY|O_NONBLOCK fails with ENXIO. Log this clearly.
+    import errno as _errno
+    try:
+        _test_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(_test_fd)
+        log(f"[talk] FIFO has a reader (tutk_client talk thread is alive)")
+    except OSError as _e:
+        if _e.errno == _errno.ENXIO:
+            log(f"[talk] FIFO has NO reader — tutk_client talk thread may not be running "
+                f"(check the tutk log for '[talk] FIFO open' or avSendAudioData errors)")
+        else:
+            log(f"[talk] FIFO open check: {_e}")
     rate = os.environ.get("OWLET_TALK_RATE", "8000")
-    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + input_args
+    # -y is CRITICAL: the output path is a pre-existing FIFO. Without -y ffmpeg
+    # sees an "existing file", prompts "Overwrite? [y/N]", gets no stdin, and
+    # exits writing ZERO bytes — so no audio ever reaches the camera speaker.
+    cmd = (["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"] + input_args
            + ["-ac", "1", "-ar", str(rate), "-c:a", "aac", "-b:a", "24k", "-f", "adts", fifo])
+    log(f"[talk] cmd: {' '.join(cmd)}")
     with _PLAY_LOCK:
         old = PLAY_PROCS.get(camera)
         if old and old.poll() is None:
@@ -867,10 +886,24 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         except Exception as e:  # noqa: BLE001
             return False, f"ffmpeg failed: {e}", None
         PLAY_PROCS[camera] = proc
+
+    # Stream ffmpeg's stderr into the webapp log so errors are visible.
+    def _drain_ffmpeg_stderr():
+        try:
+            for raw in proc.stderr:
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    log(f"[ffmpeg/talk] {line}")
+        except Exception:  # noqa: BLE001
+            pass
+        rc = proc.wait()
+        log(f"[talk] ffmpeg exited rc={rc}")
+    threading.Thread(target=_drain_ffmpeg_stderr, daemon=True).start()
+
     return True, "playing", proc
 
 
@@ -912,17 +945,47 @@ def delete_sound(fname):
     return jsonify({"ok": True})
 
 
+def _schedule_stop(camera, proc, seconds: float):
+    """Stop THIS playback process after `seconds` (the streamed-audio sleep timer).
+    The camera-side timer_ms only applies to the app's native player, so for
+    streamed mp3/lullaby we enforce the timer here by terminating this exact proc."""
+    def _stop():
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                log(f"[play] {camera}: sleep timer elapsed — stopped playback")
+        except Exception:  # noqa: BLE001
+            pass
+    t = threading.Timer(seconds, _stop)
+    t.daemon = True
+    t.start()
+
+
 @app.post("/api/play/<camera>")
 def play_sound(camera):
     from werkzeug.utils import secure_filename
     if not _known_camera(camera):
         return jsonify({"ok": False, "error": "no such camera"}), 404
-    fname = secure_filename((request.json or {}).get("file", ""))
+    body = request.json or {}
+    fname = secure_filename(body.get("file", ""))
     path = os.path.join(cs.SOUNDS_DIR, fname)
     if not fname or not os.path.exists(path):
         return jsonify({"ok": False, "error": "sound not found"}), 404
-    ok, msg, _ = _ffmpeg_to_speaker(camera, ["-re", "-i", path])
-    log(f"[play] {camera}: {fname} -> {msg}")
+    # loop=True repeats the track (lullaby/white-noise); timer_min auto-stops it.
+    input_args = ["-re"]
+    if body.get("loop"):
+        input_args = ["-stream_loop", "-1", "-re"]
+    input_args += ["-i", path]
+    ok, msg, proc = _ffmpeg_to_speaker(camera, input_args)
+    try:
+        timer_min = float(body.get("timer_min") or 0)
+    except (TypeError, ValueError):
+        timer_min = 0
+    if ok and proc and timer_min > 0:
+        _schedule_stop(camera, proc, timer_min * 60)
+    extra = (" [loop]" if body.get("loop") else "") + \
+            (f" [{timer_min:g}min timer]" if timer_min > 0 else "")
+    log(f"[play] {camera}: {fname} -> {msg}{extra}")
     return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
 
 
@@ -969,6 +1032,196 @@ def talk_stop(camera):
     return jsonify({"ok": True})
 
 
+@app.get("/api/talk/<camera>/fifo_status")
+def talk_fifo_status(camera):
+    """Diagnostic: report whether tutk_client's talk FIFO is open for reading."""
+    import errno as _errno
+    fifo = cs.talk_fifo_path(camera)
+    exists = os.path.exists(fifo)
+    if not exists:
+        return jsonify({"fifo": fifo, "exists": False,
+                        "reader": False, "error": "FIFO not found (camera not streaming?)"}), 404
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        return jsonify({"fifo": fifo, "exists": True, "reader": True,
+                        "message": "FIFO has a reader — tutk_client talk thread is alive"})
+    except OSError as e:
+        if e.errno == _errno.ENXIO:
+            return jsonify({"fifo": fifo, "exists": True, "reader": False,
+                            "error": "FIFO has NO reader — tutk_client talk thread not running "
+                                     "(check log for avSendAudioData or FIFO open errors)"}), 500
+        return jsonify({"fifo": fifo, "exists": True, "reader": None,
+                        "error": str(e)}), 500
+
+
+# --------------------------------------------------------------------------- #
+# native audio player (camera built-in lullabies / soothing sounds)
+# --------------------------------------------------------------------------- #
+_LULLABY_SEQ = [0]
+_LULLABY_LOCK = threading.Lock()
+
+
+def _lullaby_rpc(camera: str, req: dict, want_resp: bool, timeout: float = 4.0):
+    """Drop a JSON command in the camera's audiocmd file; if want_resp, wait for
+    tutk_client to write the matching reply to the audioresp file."""
+    import json as _json
+    cmd_path = cs.audiocmd_file_path(camera)
+    resp_path = cs.audioresp_file_path(camera)
+    if not os.path.exists(cmd_path):
+        return False, {"error": "camera isn't streaming yet — start its stream first"}
+    with _LULLABY_LOCK:
+        _LULLABY_SEQ[0] += 1
+        rid = _LULLABY_SEQ[0]
+    req = dict(req, id=rid)
+    try:
+        with open(cmd_path, "w") as f:
+            _json.dump(req, f)
+    except OSError as e:  # noqa: BLE001
+        return False, {"error": f"cannot write command: {e}"}
+    if not want_resp:
+        return True, {"ok": True}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(resp_path) as f:
+                resp = _json.load(f)
+            if resp.get("id") == rid:
+                return True, resp
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.15)
+    return False, {"error": "no response from camera (timeout)"}
+
+
+@app.get("/api/lullaby/<camera>/tracks")
+def lullaby_tracks(camera):
+    """List the camera's built-in audio tracks (UUID + duration). The camera
+    self-reports these — no cloud needed."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "sources"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, "items": resp.get("items") or [], "raw": resp})
+
+
+@app.get("/api/lullaby/<camera>/state")
+def lullaby_state(camera):
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "state"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, "state": resp})
+
+
+@app.post("/api/lullaby/<camera>/play")
+def lullaby_play(camera):
+    """Play built-in tracks by UUID, with optional repeat + camera-side sleep
+    timer (timeout_ms)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    body = request.json or {}
+    uuids = body.get("uuids") or ([body["uuid"]] if body.get("uuid") else [])
+    req = {"action": "play", "uuids": uuids}
+    if body.get("repeat") is not None:
+        req["repeat"] = bool(body["repeat"])
+    if body.get("timeout_ms") is not None:
+        try:
+            req["timeout_ms"] = int(body["timeout_ms"])
+        except (TypeError, ValueError):
+            pass
+    ok, resp = _lullaby_rpc(camera, req, want_resp=False)
+    log(f"[lullaby] {camera}: play {len(uuids)} track(s) -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
+@app.post("/api/lullaby/<camera>/<action>")
+def lullaby_transport(camera, action):
+    """stop / pause / next / prev / reset for the native player."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    if action not in ("stop", "pause", "next", "prev", "reset"):
+        return jsonify({"ok": False, "error": "bad action"}), 400
+    ok, resp = _lullaby_rpc(camera, {"action": action}, want_resp=False)
+    log(f"[lullaby] {camera}: {action} -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
+@app.post("/api/led/<camera>")
+def set_led(camera):
+    """Turn the camera's status indicator light on/off (the app's SET_LED_STATUS)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    on = bool((request.json or {}).get("on"))
+    ok, resp = _lullaby_rpc(camera, {"action": "led", "on": on}, want_resp=False)
+    log(f"[led] {camera}: {'on' if on else 'off'} -> {ok}")
+    return jsonify({"ok": ok, **resp}), (200 if ok else 502)
+
+
+@app.get("/api/info/<camera>")
+def camera_info(camera):
+    """Camera model / vendor / firmware (the app's DEVINFO)."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    ok, resp = _lullaby_rpc(camera, {"action": "devinfo"}, want_resp=True)
+    if not ok:
+        return jsonify({"ok": False, **resp}), 502
+    return jsonify({"ok": True, **resp})
+
+
+@app.get("/api/volume/<camera>")
+def get_volume(camera):
+    """Current speaker volume (0-100). Prefers the camera's actual value (live
+    GET_SPK_MIC_VOL), then the live control file, then the saved setting."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    # best-effort live readback from the camera
+    if os.path.exists(cs.audiocmd_file_path(camera)):
+        ok, resp = _lullaby_rpc(camera, {"action": "getvol"}, want_resp=True, timeout=3.5)
+        if ok and resp.get("percent") is not None:
+            return jsonify({"ok": True, "percent": resp["percent"], "source": "camera"})
+    pct = None
+    try:
+        with open(cs.vol_file_path(camera)) as f:
+            pct = int(f.read().strip())
+    except (OSError, ValueError):
+        cam = cs.find_camera(cs.load_config(), camera) or {}
+        try:
+            pct = int(str(cam.get("spk_vol")).strip())
+        except (TypeError, ValueError):
+            pct = None
+    return jsonify({"ok": True, "percent": pct, "source": "saved"})
+
+
+@app.post("/api/volume/<camera>")
+def set_volume(camera):
+    """Set speaker volume 0-100. Writes the live control file (tutk_client pushes
+    SET_SPK_VOL to the camera within ~1s) and persists it as the camera's default."""
+    if not _known_camera(camera):
+        return jsonify({"ok": False, "error": "no such camera"}), 404
+    try:
+        pct = int((request.json or {}).get("percent"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "percent must be an integer 0-100"}), 400
+    pct = max(0, min(100, pct))
+    # live: write the control file the volume thread watches
+    try:
+        with open(cs.vol_file_path(camera), "w") as f:
+            f.write(str(pct))
+    except OSError as e:  # noqa: BLE001
+        log(f"[vol] cannot write control file: {e}")
+    # persist as the camera's default (applied on next (re)connect too)
+    cfg = cs.load_config()
+    cam = cs.find_camera(cfg, camera)
+    if cam is not None:
+        cam["spk_vol"] = str(pct)
+        save_config(cfg, regenerate=True)
+    log(f"[vol] {camera}: speaker volume set to {pct}%")
+    return jsonify({"ok": True, "percent": pct})
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -980,4 +1233,27 @@ if __name__ == "__main__":
     if not os.path.exists(cs.CONFIG_PATH):
         if not save_config(cs.load_config()):
             log("starting the UI anyway so you can fix the config-folder permission.")
-    app.run(host="0.0.0.0", port=int(os.environ.get("UI_PORT", "8088")), threaded=True)
+    # Serve on HTTPS so browsers allow microphone access (getUserMedia requires
+    # a secure context — HTTPS or localhost — on modern browsers).
+    # The cert is generated by start-bionic.sh; if it's missing we try the
+    # werkzeug 'adhoc' mode (needs cryptography pkg) then fall back to HTTP.
+    cert = "/config/ssl/cert.pem"
+    key  = "/config/ssl/key.pem"
+    if os.path.isfile(cert) and os.path.isfile(key):
+        ssl_ctx = (cert, key)
+        log("TLS cert found — control panel starting on HTTPS")
+    else:
+        try:
+            # werkzeug 'adhoc' works when the `cryptography` package is installed.
+            # Test it eagerly so we don't get a late import error at run time.
+            from cryptography import x509 as _x509  # noqa: F401
+            ssl_ctx = "adhoc"
+            log("TLS: cryptography pkg available — using adhoc cert (HTTPS)")
+        except ImportError:
+            ssl_ctx = None
+            log("WARNING: no TLS cert (/config/ssl/cert.pem) and `cryptography` "
+                "pip package not installed — mic blocked (needs https or localhost). "
+                "Use Chrome flag chrome://flags/#unsafely-treat-insecure-origin-as-secure "
+                "to whitelist http://[your-ip]:8088 as a workaround.")
+    app.run(host="0.0.0.0", port=int(os.environ.get("UI_PORT", "8088")),
+            threaded=True, ssl_context=ssl_ctx)

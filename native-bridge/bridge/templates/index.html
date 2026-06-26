@@ -98,12 +98,47 @@
         <button id="btn-stop-sound">⏹ Stop</button>
         <span class="hint" id="talk-status"></span>
       </div>
+      <div class="row" id="vol-row">
+        <label for="spk-vol" class="hint">🔊 Speaker volume</label>
+        <input type="range" id="spk-vol" min="0" max="100" step="20" value="60" style="flex:1">
+        <span class="hint" id="spk-vol-val">60%</span>
+      </div>
+      <div class="row" id="lullaby-opts">
+        <label class="hint"><input type="checkbox" id="snd-loop"> 🔁 Loop</label>
+        <label class="hint">⏱ Sleep timer
+          <select id="snd-timer">
+            <option value="0">off</option>
+            <option value="15">15 min</option>
+            <option value="30">30 min</option>
+            <option value="45">45 min</option>
+            <option value="60">1 hr</option>
+            <option value="120">2 hr</option>
+          </select>
+        </label>
+      </div>
       <div id="sound-drop" class="dropzone">
         <input type="file" id="sound-file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg" multiple hidden>
         🎵 Drag &amp; drop lullaby files here, or <button id="btn-sound-browse" class="mini">browse</button>
         <div class="prog" id="snd-prog"><div class="bar" id="snd-bar"></div></div>
       </div>
       <div id="sound-list" class="sound-list"></div>
+      <details id="lullaby-native" style="margin-top:10px">
+        <summary class="hint">🎼 Camera's built-in lullabies (plays on the camera itself)</summary>
+        <p class="hint">These are the soothing sounds stored on the camera — the same ones the Owlet app uses. Loop &amp; sleep-timer above apply here too (the sleep timer is enforced by the camera).</p>
+        <div class="row">
+          <button id="btn-lullaby-load" class="mini">🔄 Load camera sounds</button>
+          <button id="btn-lullaby-stop" class="mini danger">⏹ Stop camera sound</button>
+        </div>
+        <div id="lullaby-list" class="sound-list"></div>
+      </details>
+      <div class="row" id="cam-controls" style="margin-top:10px">
+        <span class="hint">💡 Status light</span>
+        <button id="btn-led-on" class="mini">On</button>
+        <button id="btn-led-off" class="mini">Off</button>
+        <span class="spacer"></span>
+        <button id="btn-cam-info" class="mini">ℹ️ Camera info</button>
+      </div>
+      <div id="cam-info" class="hint"></div>
     </section>
 
     <!-- ============ SENSORS / VITALS ============ -->

@@ -124,6 +124,9 @@ function buildCard(cam, ports){
             <option value="">auto-probe</option><option value="2">Auto</option>
             <option value="1">DTLS</option><option value="0">Simple</option>
           </select></label>
+        <label style="grid-column:1/-1"><input type="checkbox" class="f-skip-spk"> Skip SPEAKERSTART IOCTL
+          <span class="hint" style="display:inline"> — enable if Talk drops the video. Some cameras open speaker bi-directionally from AUDIOSTART alone.</span>
+        </label>
       </div>
       <div class="row"><button class="save-adv">Save camera settings</button></div>
     </div>`;
@@ -133,6 +136,7 @@ function buildCard(cam, ports){
   el.querySelector(".f-uid").value = cam.uid || "";
   el.querySelector(".f-authkey").value = cam.authkey || "";
   el.querySelector(".f-sec").value = cam.av_security_mode || "";
+  el.querySelector(".f-skip-spk").checked = !!(cam.skip_speakerstart);
 
   el.querySelector(".connect").onclick = (e) => withLoading(e.currentTarget, async () => {
     await fetch(`/api/cameras/${cam.name}/diagnose`, {method:"POST"});
@@ -158,6 +162,7 @@ function buildCard(cam, ports){
       uid: el.querySelector(".f-uid").value,
       authkey: el.querySelector(".f-authkey").value,
       av_security_mode: el.querySelector(".f-sec").value,
+      skip_speakerstart: el.querySelector(".f-skip-spk").checked ? "1" : "",
     };
     const avpw = el.querySelector(".f-avpw").value;
     if (avpw) body.av_password = avpw;
@@ -231,8 +236,12 @@ async function loadSounds(){
     row.innerHTML = `<button class="mini snd-play">▶</button><span class="snd-name">${esc(f)}</span>
       <span class="spacer"></span><button class="mini snd-del danger">🗑</button>`;
     row.querySelector(".snd-play").onclick = async () => {
-      const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f})});
-      const j = await r.json(); toast(r.ok ? `▶ ${f} → ${talkCam()}` : (j.message||j.error||"couldn't play"), r.ok?"good":"bad");
+      const loop = !!($("snd-loop") && $("snd-loop").checked);
+      const timer_min = ($("snd-timer") ? parseFloat($("snd-timer").value) : 0) || 0;
+      const r = await fetch(`/api/play/${talkCam()}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({file:f, loop, timer_min})});
+      const j = await r.json();
+      const extra = (loop?" 🔁":"") + (timer_min?` ⏱${timer_min}m`:"");
+      toast(r.ok ? `▶ ${f} → ${talkCam()}${extra}` : (j.message||j.error||"couldn't play"), r.ok?"good":"bad");
     };
     row.querySelector(".snd-del").onclick = async () => {
       if(!confirm(`Delete ${f}?`)) return;
@@ -535,13 +544,80 @@ $("btn-copy").onclick  = async () => {
   t.addEventListener("mouseup",up);     t.addEventListener("mouseleave",up);
   t.addEventListener("touchend",up,{passive:false});
   $("btn-stop-sound").onclick=async()=>{ await fetch(`/api/talk/${talkCam()}/stop`,{method:"POST"}); toast("Stopped.",""); };
+  const tc=$("talk-cam"); if(tc) tc.addEventListener("change", loadVolume);
+  if($("btn-led-on")) $("btn-led-on").onclick=()=>setLed(true);
+  if($("btn-led-off")) $("btn-led-off").onclick=()=>setLed(false);
+  if($("btn-cam-info")) $("btn-cam-info").onclick=loadCamInfo;
+  if($("btn-lullaby-load")) $("btn-lullaby-load").onclick=loadLullabies;
+  if($("btn-lullaby-stop")) $("btn-lullaby-stop").onclick=async()=>{
+    const r=await fetch(`/api/lullaby/${talkCam()}/stop`,{method:"POST"});
+    toast(r.ok?"⏹ camera sound stopped":"stop failed", r.ok?"good":"bad");
+  };
   $("btn-sound-browse").onclick=()=>$("sound-file").click();
   $("sound-file").onchange=(e)=>uploadSounds(e.target.files);
   const dz=$("sound-drop");
   ["dragover","dragenter"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add("over");}));
   ["dragleave","drop"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove("over");}));
   dz.addEventListener("drop",e=>uploadSounds(e.dataTransfer.files));
+
+  // speaker volume slider
+  const vs=$("spk-vol"), vv=$("spk-vol-val");
+  if(vs){
+    vs.addEventListener("input", ()=>{ if(vv) vv.textContent=vs.value+"%"; });
+    vs.addEventListener("change", async ()=>{
+      const r=await fetch(`/api/volume/${talkCam()}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({percent:parseInt(vs.value,10)})});
+      toast(r.ok?`🔊 volume ${vs.value}%`:"couldn't set volume", r.ok?"good":"bad");
+    });
+  }
 })();
+
+async function loadLullabies(){
+  const box=$("lullaby-list"); if(!box) return;
+  box.innerHTML = `<span class="hint">Asking the camera…</span>`;
+  let j; try{ j=await (await fetch(`/api/lullaby/${talkCam()}/tracks`)).json(); }
+  catch(e){ box.innerHTML=`<span class="hint">couldn't reach camera</span>`; return; }
+  if(!j.ok){ box.innerHTML=`<span class="hint">${esc(j.error||"no tracks")}</span>`; return; }
+  const items=j.items||[];
+  if(!items.length){ box.innerHTML=`<span class="hint">Camera reported no built-in tracks.</span>`; return; }
+  box.innerHTML="";
+  items.forEach((it,i)=>{
+    const dur = it.duration_ms ? Math.round(it.duration_ms/1000)+"s" : "";
+    const row=document.createElement("div"); row.className="snd-row";
+    row.innerHTML=`<button class="mini snd-play">▶</button><span class="snd-name">Track ${i+1}
+      <span class="hint">${esc((it.uuid||"").slice(0,8))} ${dur}</span></span>`;
+    row.querySelector(".snd-play").onclick=async()=>{
+      const loop=!!($("snd-loop")&&$("snd-loop").checked);
+      const tmin=($("snd-timer")?parseFloat($("snd-timer").value):0)||0;
+      const payload={uuid:it.uuid, repeat:loop};
+      if(tmin>0) payload.timeout_ms=Math.round(tmin*60000);
+      const r=await fetch(`/api/lullaby/${talkCam()}/play`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const jj=await r.json();
+      toast(r.ok?`🎼 playing on camera${loop?" 🔁":""}${tmin?` ⏱${tmin}m`:""}`:(jj.error||"play failed"), r.ok?"good":"bad");
+    };
+    box.appendChild(row);
+  });
+}
+
+async function setLed(on){
+  const r=await fetch(`/api/led/${talkCam()}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({on})});
+  toast(r.ok?`💡 status light ${on?"on":"off"}`:"couldn't set light", r.ok?"good":"bad");
+}
+async function loadCamInfo(){
+  const box=$("cam-info"); if(box) box.textContent="Asking the camera…";
+  let j; try{ j=await (await fetch(`/api/info/${talkCam()}`)).json(); }catch(e){ if(box) box.textContent="couldn't reach camera"; return; }
+  if(!j.ok){ if(box) box.textContent=esc(j.error||"no info"); return; }
+  const parts=[]; if(j.model) parts.push("Model "+j.model); if(j.firmware) parts.push("FW "+j.firmware);
+  if(j.vendor) parts.push(j.vendor); if(j.version) parts.push("v"+j.version);
+  if(box) box.textContent=parts.join(" · ")||"(no fields)";
+}
+
+async function loadVolume(){
+  const vs=$("spk-vol"), vv=$("spk-vol-val"); if(!vs) return;
+  try{
+    const j=await (await fetch(`/api/volume/${talkCam()}`)).json();
+    if(j && j.percent!=null){ vs.value=j.percent; if(vv) vv.textContent=j.percent+"%"; }
+  }catch(e){}
+}
 
 loadAccount();
 startLogStream();
@@ -549,8 +625,9 @@ refreshStatus();
 refreshCameras();
 refreshFindings();
 loadSounds();
+loadVolume();
 loadVitals();
 loadMqtt();
 setInterval(refreshStatus, 5000);
-setInterval(loadVitals, 30000);
+setInterval(loadVitals, 2500);   // near-live: temp rides every video frame, rest polls ~2s
 setInterval(refreshCameras, 5000);
