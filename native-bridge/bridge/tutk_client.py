@@ -281,12 +281,19 @@ def _talk_frameinfo(ts_ms: int) -> bytes:
     return bytes(fi)
 
 
-def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list) -> bytes:
+def _send_adts(av, av_idx, buf: bytes, ts0: float, stats: list,
+               stop_evt=None) -> bytes:
     """Parse ADTS AAC frames from buf, send each as a raw AAC access unit via
     avSendAudioData. Returns leftover bytes (an incomplete trailing frame).
     stats=[sent, rejected] is updated so the talk loop can log delivery."""
     i, n = 0, len(buf)
     while n - i >= 7:
+        # Bail immediately between frames if shutdown is requested — avClientStop
+        # is called before this, but avSendAudioData can still hang on a dead
+        # channel inside the C lib.  Checking here lets us exit after the current
+        # in-flight C call returns rather than queuing more frames onto a dead av_idx.
+        if stop_evt is not None and stop_evt.is_set():
+            return b""
         if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:   # ADTS sync 0xFFFx
             i += 1
             continue
@@ -379,7 +386,7 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                     speaking = True
                     ts0 = time.time()
                     stats[0] = stats[1] = stats[2] = 0
-                buf = _send_adts(av, av_idx, buf + chunk, ts0, stats)
+                buf = _send_adts(av, av_idx, buf + chunk, ts0, stats, stop_evt=stop_evt)
                 last_audio = time.monotonic()
                 # If the camera tore the session down mid-send, stop NOW so we
                 # don't keep calling avSendAudioData on a dead channel (hangs).
@@ -400,7 +407,11 @@ def _talk_thread(av: CDLL, av_idx: int, stop_evt: threading.Event) -> None:
                 time.sleep(0.02)
     finally:
         _TALKING.clear()   # always let the audio-RECV probe resume
-        if speaking:
+        # Skip SPEAKERSTOP when the session is already being torn down by
+        # avClientStop (stop_evt set) — avSendIOCtrl on a stopped av_idx can
+        # block inside the C lib and cause join() to time out, leaking this
+        # thread across reconnects (showing as heartbeats every ~10s instead of 30s).
+        if speaking and not stop_evt.is_set():
             try:
                 _spk(IOTYPE_SPEAKERSTOP)
             except Exception:  # noqa: BLE001
@@ -807,6 +818,9 @@ def stream_once(uid: str, sec_mode: int) -> int:
         for thr in (audio_thr, talk_thr, sensors_thr):
             if thr is not None:
                 thr.join(timeout=3)
+                if thr.is_alive():
+                    log(f"[warn] {thr.name!r} still alive after 3s — possible thread "
+                        "leak (avSendAudioData/avSendIOCtrl may be hung in C lib)")
         # Always tear down so the next attempt's IOTC_Initialize2 doesn't return
         # -3 (ALREADY_INITIALIZED) and avClientStart doesn't see a stale channel.
         if session >= 0:
