@@ -24,8 +24,13 @@ No phone. No Android emulator. No cloud relay. It talks to the camera directly o
 - 🦉 **A single container** — drop in your Owlet login, get `rtsp://<host>:8554/owlet`.
 - 🌐 **A friendly web UI** — status dashboard, in‑browser APK upload, one‑click "Connect & Diagnose," live logs.
 - 🏠 **100% local video** — once connected, frames go camera → bridge directly over your LAN; they never touch Owlet's or ThroughTek's servers.
+- 🎙️ **Two‑way audio** — hold‑to‑talk into the room, play uploaded MP3s, or trigger the camera's **built‑in lullabies/soothing sounds** (with a hardware sleep timer) — all reverse‑engineered from the app, byte‑for‑byte.
+- 🌡️ **Room sensors → Home Assistant** — temperature (live, per video frame), humidity, sound level, brightness, Wi‑Fi RSSI, auto‑published via MQTT discovery.
+- 🎛️ **Camera controls** — speaker volume, status indicator light on/off, and a model/firmware readout.
 - 🔁 **Self‑healing** — keeps the camera session alive 24/7 and reconnects automatically after a Frigate restart or a power cut.
 - 🚫 **Nothing proprietary shipped** — you supply your own copy of the Owlet app; the bridge extracts the TUTK libraries from it for you.
+
+> Everything the bridge does is replicated from the official Owlet app's own protocol (decompiled and verified) — no cloud relay, no emulator. The one exception is **motion/sound *push* alerts**, which the app delivers via Firebase cloud messaging, not the local camera link — so those can't be reproduced locally (the live **sound level** is published instead, which you can threshold in Home Assistant).
 
 ---
 
