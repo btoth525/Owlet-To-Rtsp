@@ -276,15 +276,24 @@ _TALKING = threading.Event()
 
 
 def _talk_frameinfo(ts_ms: int) -> bytes:
-    """16-byte FRAMEINFO_t for sent audio: codec_id@0, flags@2, timestamp@8
-    (the standard TUTK layout). codec/flags come from the live probe when known,
-    else the configured defaults."""
+    """16-byte audio frame header, byte-for-byte matching the Owlet app's
+    e1.d.parseContent(short codec, byte flags, byte, byte, int ts):
+        [0:2]  codec_id   little-endian uint16   (0x0088 = AAC)
+        [2]    flags       (0x02)
+        [3]    0
+        [4]    0
+        [5:12] 0
+        [12:16] timestamp  little-endian uint32   <-- NOT offset 8!
+    The camera reads the timestamp at offset 12; we previously wrote it at 8,
+    so every frame carried ts=0 and the camera's audio jitter buffer never
+    scheduled playback (frames accepted, 0 rejected, but SILENT). codec/flags
+    come from the live probe when known, else the configured defaults."""
     codec = _PROBED_AUDIO["codec_id"] if _PROBED_AUDIO["codec_id"] is not None else SPEAKER_CODEC_ID
     flags = _PROBED_AUDIO["flags"] if _PROBED_AUDIO["flags"] is not None else SPEAKER_FLAGS
     fi = bytearray(16)
-    struct.pack_into("<H", fi, 0, codec & 0xFFFF)        # codec_id
-    fi[2] = flags & 0xFF                                  # flags
-    struct.pack_into("<I", fi, 8, ts_ms & 0xFFFFFFFF)    # timestamp
+    struct.pack_into("<H", fi, 0, codec & 0xFFFF)        # codec_id  @0
+    fi[2] = flags & 0xFF                                  # flags     @2
+    struct.pack_into("<I", fi, 12, ts_ms & 0xFFFFFFFF)   # timestamp @12 (per app)
     return bytes(fi)
 
 
