@@ -104,7 +104,18 @@ CAM_SENSORS_PATH = os.environ.get("OWLET_CAM_SENSORS", "")
 SENSORS_ENABLED = os.environ.get("OWLET_SENSORS", "1") != "0"
 IOTYPE_GET_REALTIME_REQ = 960   # 0x3C0
 IOTYPE_GET_REALTIME_RESP = 961  # 0x3C1
-CAM_SENSOR_INTERVAL = int(os.environ.get("OWLET_SENSOR_INTERVAL") or "10")
+# The Owlet app polls GET_REALTIME_DATA every 5s for the production vitals; we
+# poll a bit faster (humidity/brightness/wifi only come from this IOCTL). It's a
+# cheap mutex-serialized req/resp, so 2s is safe.
+CAM_SENSOR_INTERVAL = int(os.environ.get("OWLET_SENSOR_INTERVAL") or "2")
+# Temperature rides EVERY video frame in the frame-info struct — the app reads it
+# per-frame for the live readout, so it's effectively instant. We publish it on
+# this (much shorter) interval rather than the IOCTL interval. ~1s avoids writing
+# the sidecar at 25 fps while still feeling live.
+try:
+    FRAME_SENSOR_INTERVAL = float(os.environ.get("OWLET_FRAME_SENSOR_INTERVAL") or "1")
+except ValueError:
+    FRAME_SENSOR_INTERVAL = 1.0
 # frame-info field offsets (little-endian) in the Owlet extended FRAMEINFO
 _FI_FLAGS = 2
 _FI_TEMP = 16
@@ -142,25 +153,26 @@ def _publish_cam_sensors(**fields) -> None:
 
 
 def _parse_frame_sensors(info: bytes, n: int) -> None:
-    """Pull temp/noise/motion/sound from the extended frame-info struct.
+    """Publish the live temperature that rides in every video frame's frame-info.
 
-    Throttled to CAM_SENSOR_INTERVAL so we're not writing the sidecar at 25fps.
+    Temperature is the one field the Owlet app trusts from frame-info — it reads
+    getTemperature() per frame for the instant on-screen readout (e1/c temp@0x10).
+    The frame also carries audio_db@0x18 but the app parses-and-discards it, so we
+    leave noise/humidity/brightness to the authoritative GET_REALTIME_DATA poll.
+    Throttled to FRAME_SENSOR_INTERVAL (~1s) so we don't write the sidecar at 25fps.
     """
     if not (CAM_SENSORS_PATH and SENSORS_ENABLED) or n < _FI_MIN_LEN:
         return
     now = time.time()
-    if now - _last_frame_sensor[0] < CAM_SENSOR_INTERVAL:
+    if now - _last_frame_sensor[0] < FRAME_SENSOR_INTERVAL:
         return
     _last_frame_sensor[0] = now
-    flags = info[_FI_FLAGS]
     temp = int.from_bytes(info[_FI_TEMP:_FI_TEMP + 4], "little", signed=True)
-    noise = int.from_bytes(info[_FI_AUDIO_DB:_FI_AUDIO_DB + 4], "little", signed=True)
-    _publish_cam_sensors(
-        temperature=temp,
-        noise=noise,
-        motion=1 if (flags & 0x02) else 0,
-        sound=1 if (flags & 0x08) else 0,
-    )
+    # Gate obviously-bad frames (the app validates with isValidCelsiusTemperature);
+    # a raw room temp of -20..60 °C is sane, anything else is a junk frame.
+    scaled = temp / TEMP_SCALE if TEMP_SCALE else temp
+    if -20 <= scaled <= 60:
+        _publish_cam_sensors(temperature=temp)
 
 
 def _realtime_thread(av, av_idx, stop_evt):

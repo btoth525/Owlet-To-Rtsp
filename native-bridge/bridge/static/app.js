@@ -613,5 +613,5 @@ loadVolume();
 loadVitals();
 loadMqtt();
 setInterval(refreshStatus, 5000);
-setInterval(loadVitals, 30000);
+setInterval(loadVitals, 2500);   // near-live: temp rides every video frame, rest polls ~2s
 setInterval(refreshCameras, 5000);
