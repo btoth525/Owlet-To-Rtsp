@@ -255,9 +255,19 @@ def main() -> None:
                 api = None
                 fails += 1
             except Exception as e:  # noqa: BLE001
-                # transient (network/JSON) -> KEEP the warm session, just back off.
-                # Re-authing on every blip risks Owlet rate-limiting the account.
-                log(f"[vitals] poll error: {e}")
+                # A 401/403 means the Ayla access_token expired -> we MUST drop the
+                # session and re-auth. (_ayla_get calls raise_for_status(), which
+                # throws requests.HTTPError — NOT an OwletError — so an expired
+                # token lands here, not in the OwletError branch above, and would
+                # otherwise keep the dead token forever.) Anything else
+                # (network/JSON blip) keeps the warm session and just backs off, so
+                # we don't hammer login and risk Owlet rate-limiting the account.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (401, 403) or " 401 " in f" {e} " or " 403 " in f" {e} ":
+                    log(f"[vitals] auth expired ({status or 'HTTP'}) -> re-authenticating")
+                    api = None
+                else:
+                    log(f"[vitals] poll error: {e}")
                 fails += 1
 
         # merge live cam sensors from tutk_client sidecars (cloud-independent)
