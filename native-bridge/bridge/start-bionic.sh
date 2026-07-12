@@ -91,4 +91,12 @@ if [ "${OWLET_VITALS_POLL:-1}" = "1" ]; then
   python3 /app/vitals_poller.py &
 fi
 
+# Self-heal a wedged P2P session: if a camera's RTSP serves no frames for a few
+# minutes straight, kill go2rtc so Docker restarts the container with a fresh
+# login + fresh KMS creds. Catches wedges that leave go2rtc alive (so Docker
+# would otherwise never restart it). Set OWLET_WATCHDOG=0 to disable.
+if [ "${OWLET_WATCHDOG:-1}" = "1" ]; then
+  python3 /app/watchdog.py &
+fi
+
 exec go2rtc -config "$GO2RTC_CFG"
