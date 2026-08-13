@@ -45,8 +45,11 @@ EXPOSE 8088 1984 8554 8555/tcp 8555/udp
 # Report unhealthy when a configured camera's RTSP serves no frames (a wedged
 # P2P session). The in-container watchdog is what actually self-heals; this just
 # surfaces the state (e.g. red dot in Unraid). --check exits 0 healthy / 1 dead.
+# Exec form (JSON array), NOT shell form: this base has no /bin/sh (same reason
+# ENTRYPOINT can't be overridden with an interpreter — see note below). Shell
+# form silently always reports unhealthy ("stat /bin/sh: no such file").
 HEALTHCHECK --interval=60s --timeout=25s --start-period=180s --retries=3 \
-  CMD python3 /app/watchdog.py --check || exit 1
+  CMD ["python3", "/app/watchdog.py", "--check"]
 # Keep the base image's Termux /entrypoint.sh (runs the bootstrap, sets up the
 # Termux userspace, then execs our CMD). Do NOT override ENTRYPOINT with an
 # explicit interpreter — this base has no /bin/bash (bash lives under
