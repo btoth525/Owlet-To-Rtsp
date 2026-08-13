@@ -105,9 +105,15 @@ SESSION_MODE_NAMES = {0: "P2P", 1: "Relay", 2: "LAN"}
 IOTC_SESSION_MODE_FAIL = 0xFFFFFFFF   # nMode is unsigned; SDK reports failure as -1
 # Reject a relay-mode session and retry for direct P2P instead of silently
 # accepting it. Bounded so a network that genuinely can't reach P2P (e.g. blocked
-# UDP) still eventually gets a stream rather than retrying forever. Off entirely
-# (OWLET_REQUIRE_P2P=0) falls back to today's behavior: accept whatever connects.
-REQUIRE_P2P = os.environ.get("OWLET_REQUIRE_P2P", "1") != "0"
+# UDP) still eventually gets a stream rather than retrying forever.
+#
+# Defaults OFF. The relay-vs-P2P theory fits the data (bimodal survival curve,
+# clean auth every cycle, audio outliving video) but has never been directly
+# observed — IOTC_Session_Check() didn't exist in this codebase until this same
+# change added it. Ship logging-only, watch a dozen real connect cycles, confirm
+# the 30-90s deaths are actually the relay-mode sessions, THEN flip this on. Do
+# not default it to on before that correlation is confirmed (see TOT-35 review).
+REQUIRE_P2P = os.environ.get("OWLET_REQUIRE_P2P", "0") != "0"
 P2P_RETRY_LIMIT = int(os.environ.get("OWLET_P2P_RETRY_LIMIT") or "2")
 P2P_RETRY_WAIT = float(os.environ.get("OWLET_P2P_RETRY_WAIT") or "1.5")
 
@@ -1202,7 +1208,10 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 session = -1
                 time.sleep(P2P_RETRY_WAIT)
                 continue
-            if mode == 1:
+            if mode == 1 and not REQUIRE_P2P:
+                log("session landed in Relay mode — enforcement is off "
+                    "(OWLET_REQUIRE_P2P=0), accepting it and logging only")
+            elif mode == 1:
                 log(f"still Relay mode after {max_attempts} attempt(s) — accepting it "
                     "rather than retrying forever")
             break
