@@ -95,6 +95,22 @@ AV_ER_REMOTE_TIMEOUT_DISCONNECT = -20015
 AV_ER_SESSION_CLOSE_BY_REMOTE = -20016
 AV_ER_IOTC_CHANNEL_IN_USED = -20027   # avServStart2 on a channel already claimed
 
+# TOT-35: of 25 connect cycles logged, 23 died silently at 30-90s (video stops,
+# audio keeps flowing, no error) while the 2 that sustained ran 77min/154min.
+# Every cycle authenticates and connects cleanly, so the theory is that the dying
+# ones land in TUTK relay mode rather than direct P2P. IOTC_Session_Check() turns
+# that from a theory into a measurement: 0=P2P 1=Relay 2=LAN (IOTC_SESSION_MODE_FAIL
+# on error).
+SESSION_MODE_NAMES = {0: "P2P", 1: "Relay", 2: "LAN"}
+IOTC_SESSION_MODE_FAIL = 0xFFFFFFFF   # nMode is unsigned; SDK reports failure as -1
+# Reject a relay-mode session and retry for direct P2P instead of silently
+# accepting it. Bounded so a network that genuinely can't reach P2P (e.g. blocked
+# UDP) still eventually gets a stream rather than retrying forever. Off entirely
+# (OWLET_REQUIRE_P2P=0) falls back to today's behavior: accept whatever connects.
+REQUIRE_P2P = os.environ.get("OWLET_REQUIRE_P2P", "1") != "0"
+P2P_RETRY_LIMIT = int(os.environ.get("OWLET_P2P_RETRY_LIMIT") or "2")
+P2P_RETRY_WAIT = float(os.environ.get("OWLET_P2P_RETRY_WAIT") or "1.5")
+
 # --- camera environmental sensors (temp/humidity/noise/brightness) ------------
 # Reverse-engineered from the Owlet app (see docs/owlet-cam-sensors.md). Temp +
 # noise + motion + sound are embedded in the EXTENDED frame-info struct the cam
@@ -941,6 +957,19 @@ class St_IOTCConnectInput(Structure):
 
 
 # --------------------------------------------------------------------------- #
+# SessionModeVer — the struct IOTC_Session_Check() fills in. Standard TUTK
+# IOTCAPIs.h layout: two unsigned ints, no padding.
+#   nMode:     0 = P2P, 1 = Relay, 2 = LAN, 0xFFFFFFFF = check failed
+#   nApiLevel: remote device's API level (informational only)
+# --------------------------------------------------------------------------- #
+class SessionModeVer(Structure):
+    _fields_ = [
+        ("nMode", c_uint),
+        ("nApiLevel", c_uint),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # St_AVClientStartInConfig / St_AVClientStartOutConfig — args to avClientStartEx,
 # the AV-layer login the Owlet app uses (com.owlet.tutk.AndroidTutkSdk.startClient).
 # Layout read straight out of the Owlet libAVAPIs.so (real avClientStartEx + its
@@ -1029,6 +1058,27 @@ def smsg_av_stream(channel: int) -> bytes:
     return struct.pack("<I4s", channel, b"\x00\x00\x00\x00")
 
 
+def _session_mode(iotc: CDLL, session: int) -> int:
+    """IOTC_Session_Check(): measure whether this session landed in direct P2P
+    (0), relay (1) or LAN (2) mode. Logged unconditionally (TOT-35 wants this in
+    the container log for every cycle, not just the ones we act on) so the ops
+    audit can correlate mode against how long the session survived. Returns
+    IOTC_SESSION_MODE_FAIL if the call is unavailable or errors — callers must
+    not enforce on that value, only log it."""
+    if not hasattr(iotc, "IOTC_Session_Check"):
+        log("IOTC_Session_Check not exported by this lib build — mode unknown")
+        return IOTC_SESSION_MODE_FAIL
+    smv = SessionModeVer()
+    rc = iotc.IOTC_Session_Check(session, byref(smv))
+    if rc < 0:
+        log(f"IOTC_Session_Check -> rc={rc} (mode unknown)")
+        return IOTC_SESSION_MODE_FAIL
+    mode = smv.nMode
+    log(f"IOTC_Session_Check -> mode={SESSION_MODE_NAMES.get(mode, f'unknown({mode})')} "
+        f"({mode}) apiLevel={smv.nApiLevel}")
+    return mode
+
+
 def stream_once(uid: str, sec_mode: int) -> int:
     iotc, av, tutk = load()
 
@@ -1041,6 +1091,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
              [c_char_p, c_int, POINTER(St_IOTCConnectInput)])
     _set_sig(iotc, "IOTC_Connect_ByUID_Parallel", c_int, [c_char_p, c_int])
     _set_sig(iotc, "IOTC_Session_Close", c_int, [c_int])
+    _set_sig(iotc, "IOTC_Session_Check", c_int, [c_int, POINTER(SessionModeVer)])
     _set_sig(iotc, "IOTC_DeInitialize", c_int, [])
     _set_sig(av, "avInitialize", c_int, [c_int])
     _set_sig(av, "avDeInitialize", c_int, [])
@@ -1105,31 +1156,58 @@ def stream_once(uid: str, sec_mode: int) -> int:
     vol_thr = None
     player_thr = None
     try:
-        sid = iotc.IOTC_Get_SessionID()
-        log(f"IOTC_Get_SessionID -> {sid}")
-        if sid < 0:
-            return 3
-
         log(f"connecting UID={uid} authKey={'yes' if AUTHKEY else 'no'} …")
         ak = AUTHKEY.encode()
         if AUTHKEY and len(ak) != 8:
             log(f"WARNING: authKey is {len(ak)} chars; the SDK requires exactly 8 "
                 "(IOTC_Connect_ByUIDEx will reject it with -46)")
-        inp = St_IOTCConnectInput()
-        inp.structSize = 160               # 0xA0 — required size/version guard
-        inp.authenticationType = 0
-        inp.authKey = ak[:8]
-        inp.timeout = CONNECT_TIMEOUT
-        session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
-        log(f"IOTC_Connect_ByUIDEx -> {session}")
-        if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
-            # Fallback for cams that don't require the authKey.
-            session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
-            log(f"IOTC_Connect_ByUID_Parallel -> {session}")
-        if session < 0:
-            log(f"connect failed: {session}")
-            return 4
-        log(f"IOTC session={session}")
+
+        # TOT-35: 23 of 25 logged connect cycles authenticated cleanly, connected,
+        # then died silently at 30-90s (video stops, audio keeps flowing, no
+        # error) — theory is those sessions landed in TUTK relay mode instead of
+        # direct P2P. Measure every session with IOTC_Session_Check() and, if
+        # enforcement is on, tear down + reconnect a relay session for a bounded
+        # number of attempts before accepting whatever we get (a network that
+        # genuinely can't reach P2P must still eventually get a stream).
+        session = -1
+        mode = IOTC_SESSION_MODE_FAIL
+        max_attempts = P2P_RETRY_LIMIT + 1
+        for attempt in range(1, max_attempts + 1):
+            sid = iotc.IOTC_Get_SessionID()
+            log(f"IOTC_Get_SessionID -> {sid}")
+            if sid < 0:
+                return 3
+
+            inp = St_IOTCConnectInput()
+            inp.structSize = 160               # 0xA0 — required size/version guard
+            inp.authenticationType = 0
+            inp.authKey = ak[:8]
+            inp.timeout = CONNECT_TIMEOUT
+            session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
+            log(f"IOTC_Connect_ByUIDEx -> {session}")
+            if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
+                # Fallback for cams that don't require the authKey.
+                session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
+                log(f"IOTC_Connect_ByUID_Parallel -> {session}")
+            if session < 0:
+                log(f"connect failed: {session}")
+                return 4
+
+            mode = _session_mode(iotc, session)
+            if mode == 1 and REQUIRE_P2P and attempt < max_attempts:
+                log(f"session landed in Relay mode (attempt {attempt}/{max_attempts}) "
+                    "— tearing down and reconnecting for direct P2P")
+                closing = session
+                _safe(lambda: iotc.IOTC_Session_Close(closing))
+                session = -1
+                time.sleep(P2P_RETRY_WAIT)
+                continue
+            if mode == 1:
+                log(f"still Relay mode after {max_attempts} attempt(s) — accepting it "
+                    "rather than retrying forever")
+            break
+
+        log(f"IOTC session={session} mode={SESSION_MODE_NAMES.get(mode, 'unknown')}")
 
         av_idx = av_client_start(av, session, sec_mode)
         if av_idx < 0:
