@@ -48,7 +48,10 @@ EXPOSE 8088 1984 8554 8555/tcp 8555/udp
 # Exec form (JSON array), NOT shell form: this base has no /bin/sh (same reason
 # ENTRYPOINT can't be overridden with an interpreter — see note below). Shell
 # form silently always reports unhealthy ("stat /bin/sh: no such file").
-HEALTHCHECK --interval=60s --timeout=25s --start-period=180s --retries=3 \
+# start-period matches watchdog.py's OWLET_WATCHDOG_GRACE (60s) plus a buffer for
+# the first probe cycle — was 180s to match the old, slower watchdog timers
+# (TOT-33 tuned both down together; see watchdog.py for the reasoning).
+HEALTHCHECK --interval=60s --timeout=25s --start-period=90s --retries=3 \
   CMD ["python3", "/app/watchdog.py", "--check"]
 # Keep the base image's Termux /entrypoint.sh (runs the bootstrap, sets up the
 # Termux userspace, then execs our CMD). Do NOT override ENTRYPOINT with an

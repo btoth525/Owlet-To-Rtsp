@@ -15,10 +15,20 @@ with a fresh login + fresh KMS creds. Recovers from any wedge cause, provable or
 not.
 
   OWLET_WATCHDOG=0            disable entirely
-  OWLET_WATCHDOG_STALL=180    seconds of no-frames before a restart
-  OWLET_WATCHDOG_INTERVAL=60  seconds between probes
-  OWLET_WATCHDOG_GRACE=150    startup grace before the first probe
+  OWLET_WATCHDOG_STALL=45     seconds of no-frames before a restart
+  OWLET_WATCHDOG_INTERVAL=15  seconds between probes
+  OWLET_WATCHDOG_GRACE=60     startup grace before the first probe
 
+TOT-33: the original defaults (STALL=180, INTERVAL=60, GRACE=150) are what made
+`:latest` look like it had "broken video" — tutk_client.py already self-heals a
+no-video session on its own in ~40s (see OWLET_NO_VIDEO_TIMEOUT/OWLET_RECONNECT_WAIT
+in tutk_client.py, present since before this watchdog existed). With the old
+timers, a session that the in-process retry would have fixed in 40s instead sat
+dark for up to 180s before this watchdog escalated to a full container restart,
+then paid another ~150s GRACE before it could even confirm the fix worked —
+measured across 21 real reconnects on TOT-28 as 3.5-4.5 minutes of dead camera
+per wedge. These tighter numbers make the container-level restart a fast
+backstop for a truly wedged process instead of the slow path most sessions took.
 `python3 watchdog.py --check` probes once and exits 0 (all cameras healthy, or
 none configured yet) / 1 (a camera is dead) — used by the Docker HEALTHCHECK.
 """
@@ -31,9 +41,9 @@ import time
 
 import config_store as cs
 
-STALL = int(os.environ.get("OWLET_WATCHDOG_STALL", "180"))
-INTERVAL = int(os.environ.get("OWLET_WATCHDOG_INTERVAL", "60"))
-GRACE = int(os.environ.get("OWLET_WATCHDOG_GRACE", "150"))
+STALL = int(os.environ.get("OWLET_WATCHDOG_STALL", "45"))
+INTERVAL = int(os.environ.get("OWLET_WATCHDOG_INTERVAL", "15"))
+GRACE = int(os.environ.get("OWLET_WATCHDOG_GRACE", "60"))
 PROBE_TIMEOUT = 15
 
 
