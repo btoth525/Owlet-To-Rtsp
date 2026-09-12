@@ -91,7 +91,12 @@ before every image build).
 ## Open question the new logging will answer
 
 TOT‑35 added `IOTC_Session_Check()` logging (`mode=P2P|Relay|LAN`) on the theory
-that the short‑lived sessions are the relay‑mode ones. The stall supervisor's
+that the short‑lived sessions are the relay‑mode ones. **That check is now opt‑in
+(`OWLET_SESSION_CHECK=1`) and off by default:** its first production run
+(2026‑09‑12) crashed the stream process after every connect because the Kalay
+lib fills a much larger struct than the two‑uint one it was handed, and go2rtc
+relaunched the crashing exec ~60×/min until the Owlet KMS rate‑limited the
+account. When enabled it now uses an oversized buffer and logs the raw bytes. The stall supervisor's
 `wchan` + stack dumps add the other half: *where* the thread is stuck. Once a
 dozen real stalls have been logged with both, correlate them; if relay mode is
 the culprit, `OWLET_REQUIRE_P2P=1` becomes the fix rather than the recovery.
