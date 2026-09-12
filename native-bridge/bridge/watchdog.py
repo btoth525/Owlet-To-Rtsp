@@ -105,16 +105,13 @@ def _alive(name: str) -> bool:
 
 
 def _names(cfg: dict | None = None) -> list[str]:
-    """Cameras that can actually stream: a saved UID, or a DSN plus an account
-    login the exec can turn into a key. NOT cs.camera_names() — that falls back
-    to a placeholder `owlet` when nothing is configured yet, and probing it made
-    the old watchdog "self-heal" a fresh install into a restart loop every
-    couple of minutes until the first camera was added."""
+    """Cameras that can actually stream (see cs.streamable_names). NOT
+    cs.camera_names() — that falls back to a placeholder `owlet` when nothing is
+    configured yet, and probing it made the old watchdog "self-heal" a fresh
+    install into a restart loop every couple of minutes until the first camera
+    was added."""
     try:
-        cfg = cfg if cfg is not None else cs.load_config()
-        have_login = bool(cfg.get("email") and cfg.get("password"))
-        return [c["name"] for c in (cfg.get("cameras") or [])
-                if c.get("name") and (c.get("uid") or (c.get("camera_dsn") and have_login))]
+        return cs.streamable_names(cfg)
     except Exception:  # noqa: BLE001
         return []
 

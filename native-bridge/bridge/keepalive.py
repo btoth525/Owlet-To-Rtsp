@@ -40,7 +40,10 @@ def main() -> None:
     while True:
         now = time.monotonic()
         try:
-            want = set(cs.camera_names())
+            # Only cameras that can connect — never the placeholder `owlet` stream
+            # a fresh install renders before any camera is added (its exec exits
+            # at once and this loop would relaunch it every few seconds forever).
+            want = set(cs.streamable_names())
         except Exception:  # noqa: BLE001
             want = set(procs)  # keep what we have if the config can't be read
         # start cameras that are missing or whose keepalive died, with backoff so
