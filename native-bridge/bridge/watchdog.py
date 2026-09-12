@@ -179,22 +179,17 @@ def orphan_producer_ffmpegs(procs=None) -> list[int]:
 
 
 def reset_go2rtc_stream(name: str) -> bool:
-    """Replace the camera's go2rtc stream object (PUT /api/streams -> streams.New()).
-    go2rtc 1.9 can wedge a stream's fan-out on a consumer that stopped reading; it
-    then never reads the producer again, keeps the dead producer listed, and never
-    relaunches the exec. New() swaps the map entry: the wedged object leaks, new
-    consumers get a working stream and a fresh exec. Only a container restart used
-    to fix this (7-minute outage on 2026-09-12)."""
+    """Alias the camera's go2rtc stream name to a fresh, never-used spare stream
+    (config_store.go2rtc_swap_to_spare). go2rtc 1.9 can wedge a stream's fan-out;
+    it then never reads the producer again, keeps the dead producer listed and
+    never relaunches the exec — only a container restart used to fix this
+    (7-minute outage on 2026-09-12). Its API refuses new exec sources (PUT -> 400)
+    but a PATCH alias to a config-defined spare works. False when no spare is
+    left, so the ladder escalates to the container restart."""
     try:
-        import urllib.parse
-        import urllib.request
-        url = (f"http://127.0.0.1:{cs.G_HTTP}/api/streams?"
-               + urllib.parse.urlencode({"name": name, "src": cs._exec_source(name)}))
-        r = urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=5)
-        log(f"{name}: go2rtc stream object replaced (HTTP {r.status})")
-        return True
+        return cs.go2rtc_swap_to_spare(name, log=log) is not None
     except Exception as e:  # noqa: BLE001
-        log(f"{name}: go2rtc stream reset failed: {e}")
+        log(f"{name}: go2rtc spare swap failed: {e}")
         return False
 
 

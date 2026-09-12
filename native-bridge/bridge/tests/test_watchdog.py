@@ -196,6 +196,27 @@ class NamesTests(unittest.TestCase):
         self.assertEqual(wd._names(cfg), ["owlet"])
 
 
+class SpareStreamTests(unittest.TestCase):
+    def test_pick_first_unused_spare(self):
+        import config_store as cs
+        streams = {"owlet": {"consumers": []}, "owlet_spare1": {"consumers": []},
+                   "owlet_spare2": {"consumers": None}, "owlet_spare3": {"consumers": None}}
+        self.assertEqual(cs.pick_spare("owlet", streams), "owlet_spare2")
+        streams["owlet_spare2"]["consumers"] = []
+        self.assertEqual(cs.pick_spare("owlet", streams), "owlet_spare3")
+        streams["owlet_spare3"]["consumers"] = [{"id": 9}]
+        self.assertIsNone(cs.pick_spare("owlet", streams))          # all used -> escalate
+        self.assertIsNone(cs.pick_spare("nursery2", streams))       # no spares defined
+
+    def test_generated_config_has_identical_spares(self):
+        import config_store as cs
+        cfg = cs.render_go2rtc([dict(cs.CAMERA_DEFAULTS, name="owlet")])
+        self.assertIn("  owlet:\n", cfg)
+        for sp in cs.spare_names("owlet"):
+            self.assertIn(f"  {sp}:\n", cfg)
+        self.assertEqual(cfg.count(cs._exec_source("owlet")), 1 + cs.SPARE_STREAMS)
+
+
 class OrphanFfmpegTests(unittest.TestCase):
     def test_orphaned_producer_ffmpeg_is_found_others_are_not(self):
         prod = ("ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 "
