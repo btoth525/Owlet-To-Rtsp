@@ -414,6 +414,18 @@ def camera_names(cfg: dict | None = None) -> list[str]:
     return [c["name"] for c in cfg.get("cameras") or []] or [DEFAULT_CAM_NAME]
 
 
+def streamable_names(cfg: dict | None = None) -> list[str]:
+    """Cameras whose exec can actually connect: a saved UID, or a DSN plus an
+    account login it can turn into a key. Unlike camera_names() this does NOT
+    fall back to the placeholder `owlet` stream — the keepalive and the watchdog
+    use it so a fresh install with no camera yet is left alone instead of
+    spawning a failing exec every few seconds / restarting the container."""
+    cfg = cfg if cfg is not None else load_config()
+    have_login = bool(cfg.get("email") and cfg.get("password"))
+    return [c["name"] for c in (cfg.get("cameras") or [])
+            if c.get("name") and (c.get("uid") or (c.get("camera_dsn") and have_login))]
+
+
 # Drag-and-drop lullaby/sound MP3s live here; persisted with the config.
 SOUNDS_DIR = os.path.join(CONFIG_DIR, "sounds")
 

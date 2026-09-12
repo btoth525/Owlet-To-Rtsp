@@ -1,58 +1,96 @@
 #!/usr/bin/env python3
 """
-watchdog.py — self-heal a wedged Owlet P2P / RTSP session.
+watchdog.py — self-heal a wedged Owlet P2P / RTSP session, gently first.
 
 go2rtc (PID 1) and the TUTK exec source can wind up "connected" but delivering
 ZERO frames — an expired cloud token, a stalled Kalay session, a half-open P2P
-socket. go2rtc stays alive, so Docker never restarts the container and the RTSP
-stream just hangs (Frigate/viewers see a dead camera). Nothing recovers it on
-its own but a restart.
+socket, or tutk_client's main thread blocked inside the TUTK lib / the stdout
+pipe. go2rtc stays alive, so Docker never restarts the container and the RTSP
+stream just hangs (Frigate/viewers see a dead camera).
 
-This watchdog ffprobes each camera's local RTSP output on an interval. If a
-camera serves no video for OWLET_WATCHDOG_STALL seconds straight, it kills
-go2rtc (PID 1) so the container exits and Docker's restart policy brings it back
-with a fresh login + fresh KMS creds. Recovers from any wedge cause, provable or
-not.
+This watchdog ffprobes each camera's local RTSP output on an interval and, when a
+camera serves no video, climbs a ladder — cheapest fix first:
 
-  OWLET_WATCHDOG=0            disable entirely
-  OWLET_WATCHDOG_STALL=45     seconds of no-frames before a restart
-  OWLET_WATCHDOG_INTERVAL=15  seconds between probes
-  OWLET_WATCHDOG_GRACE=60     startup grace before the first probe
+  stage 0  tutk_client.py's own stall supervisor (OWLET_STALL_TIMEOUT, ~30s) —
+           runs inside the stream process, nothing to do here.
+  stage 1  after OWLET_WATCHDOG_STALL seconds: SIGTERM that camera's
+           tutk_client (clean session release) so go2rtc relaunches ONLY that
+           stream with a fresh KMS key. go2rtc, the web UI, the other cameras
+           and this watchdog all stay up. Repeated OWLET_WATCHDOG_PRODUCER_RESTARTS
+           times, one STALL window apart.
+  stage 2  if the camera is still dead after those: kill go2rtc (PID 1) so
+           Docker restarts the whole container (fresh login, fresh go2rtc).
+           Rate-limited: a container restart is allowed at most once per
+           OWLET_WATCHDOG_COOLDOWN seconds, doubling for every consecutive
+           restart up to OWLET_WATCHDOG_COOLDOWN_MAX, and the counter only
+           resets after OWLET_WATCHDOG_HEALTHY_RESET seconds of every camera
+           being healthy. While on cooldown the watchdog keeps doing stage 1.
 
-TOT-33: the original defaults (STALL=180, INTERVAL=60, GRACE=150) are what made
-`:latest` look like it had "broken video" — tutk_client.py already self-heals a
-no-video session on its own in ~40s (see OWLET_NO_VIDEO_TIMEOUT/OWLET_RECONNECT_WAIT
-in tutk_client.py, present since before this watchdog existed). With the old
-timers, a session that the in-process retry would have fixed in 40s instead sat
-dark for up to 180s before this watchdog escalated to a full container restart,
-then paid another ~150s GRACE before it could even confirm the fix worked —
-measured across 21 real reconnects on TOT-28 as 3.5-4.5 minutes of dead camera
-per wedge. These tighter numbers make the container-level restart a fast
-backstop for a truly wedged process instead of the slow path most sessions took.
+Why the ladder (field data, 2026-09-11, one camera, one day): 22 container
+restarts, every one of them the same shape — video frames stop, audio keeps
+flowing, tutk_client never logs its own "no video" timeout (its main thread is
+blocked, so the in-process check can't run), and the old watchdog's only move
+was a full container restart 3+ minutes later. Each restart bounced go2rtc, the
+web UI, the vitals poller and a fresh Owlet cloud login, and the camera's
+single P2P slot was still held by the dying session, so the relaunched process
+often got a dud session and the cycle repeated ("amplifying wedges", TOT-33).
+A producer-only restart fixes the same fault in seconds without any of that.
+
+  OWLET_WATCHDOG=0                       disable entirely
+  OWLET_WATCHDOG_STALL=120               seconds of no frames between actions
+  OWLET_WATCHDOG_INTERVAL=15             seconds between probes
+  OWLET_WATCHDOG_GRACE=60                startup grace before the first probe
+  OWLET_WATCHDOG_PRODUCER_RESTARTS=2     stage-1 attempts before stage 2
+  OWLET_WATCHDOG_COOLDOWN=300            min seconds between container restarts
+  OWLET_WATCHDOG_COOLDOWN_MAX=1800       cap for the doubling cooldown
+  OWLET_WATCHDOG_HEALTHY_RESET=900       all-healthy seconds that reset the cooldown
+
+STALL is deliberately longer than the in-process supervisor's full cycle
+(detect ~30s + unblock 8s + relaunch + the camera's 20s session hold + a 25s
+reconnect wait ≈ 90s) so this never pre-empts a recovery that is already in
+flight; the old 45s value (TOT-33) did exactly that.
+
+State (last container restart, consecutive count) persists in
+<config>/vitals/watchdog.json across restarts; the same file carries a live
+per-camera status the control panel shows under /api/status → "watchdog".
+
 `python3 watchdog.py --check` probes once and exits 0 (all cameras healthy, or
 none configured yet) / 1 (a camera is dead) — used by the Docker HEALTHCHECK.
 """
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import sys
 import time
 
 import config_store as cs
 
-STALL = int(os.environ.get("OWLET_WATCHDOG_STALL", "45"))
+STALL = int(os.environ.get("OWLET_WATCHDOG_STALL", "120"))
 INTERVAL = int(os.environ.get("OWLET_WATCHDOG_INTERVAL", "15"))
 GRACE = int(os.environ.get("OWLET_WATCHDOG_GRACE", "60"))
+PRODUCER_RESTARTS = int(os.environ.get("OWLET_WATCHDOG_PRODUCER_RESTARTS", "2"))
+COOLDOWN = int(os.environ.get("OWLET_WATCHDOG_COOLDOWN", "300"))
+COOLDOWN_MAX = int(os.environ.get("OWLET_WATCHDOG_COOLDOWN_MAX", "1800"))
+HEALTHY_RESET = int(os.environ.get("OWLET_WATCHDOG_HEALTHY_RESET", "900"))
 PROBE_TIMEOUT = 15
+STATE_PATH = os.path.join(cs.CONFIG_DIR, "vitals", "watchdog.json")
 
 
 def log(m: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "[watchdog]", m, flush=True)
 
 
+# --------------------------------------------------------------------------- #
+# probes
+# --------------------------------------------------------------------------- #
 def _alive(name: str) -> bool:
-    """True if the camera's local RTSP is currently serving video frames."""
+    """True if the camera's local RTSP is currently serving video frames.
+    Connecting as a consumer also makes go2rtc (re)launch an on-demand exec
+    source that isn't running — so a probe right after a stage-1 restart is what
+    brings the stream back even if no viewer is attached."""
     url = f"rtsp://127.0.0.1:{cs.G_RTSP}/{name}"
     try:
         r = subprocess.run(
@@ -66,9 +104,14 @@ def _alive(name: str) -> bool:
         return False
 
 
-def _names() -> list[str]:
+def _names(cfg: dict | None = None) -> list[str]:
+    """Cameras that can actually stream (see cs.streamable_names). NOT
+    cs.camera_names() — that falls back to a placeholder `owlet` when nothing is
+    configured yet, and probing it made the old watchdog "self-heal" a fresh
+    install into a restart loop every couple of minutes until the first camera
+    was added."""
     try:
-        return list(cs.camera_names())
+        return cs.streamable_names(cfg)
     except Exception:  # noqa: BLE001
         return []
 
@@ -80,7 +123,98 @@ def _check_once() -> int:
     return 1 if any(not _alive(n) for n in names) else 0
 
 
-def _restart() -> None:
+# --------------------------------------------------------------------------- #
+# stage 1: restart one camera's stream process (go2rtc relaunches it)
+# --------------------------------------------------------------------------- #
+def _procs() -> list[tuple[int, int, str]]:
+    """(pid, ppid, cmdline) for every process /proc lets us read."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        pid = int(d)
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmd = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+            with open(f"/proc/{pid}/stat") as fh:
+                ppid = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except Exception:  # noqa: BLE001
+            continue
+        out.append((pid, ppid, cmd))
+    return out
+
+
+def producer_pids(name: str, procs=None) -> tuple[list[int], list[int], list[int]]:
+    """Find the go2rtc exec wrapper for one camera and its children.
+
+    The generated exec is `bash -c '… python3 /app/tutk_client.py 2>>/config/
+    tutk-<name>.log | ffmpeg …'`, so the wrapper is the only process whose
+    cmdline carries BOTH `tutk_client.py` and that log name (a `tail` of the log
+    from the UI has no tutk_client.py in it; the python child has no log name in
+    its argv). Returns (python pids, other children e.g. ffmpeg, wrapper pids)."""
+    markers = [f"tutk-{name}.log"]
+    if name == cs.DEFAULT_CAM_NAME:
+        markers.append("/config/tutk.log")  # baked-in single-cam fallback config
+    procs = _procs() if procs is None else procs
+    me = os.getpid()
+    wrappers = {p for p, _pp, c in procs
+                if p != me and "tutk_client.py" in c and any(m in c for m in markers)}
+    kids = [(p, c) for p, pp, c in procs if pp in wrappers]
+    pythons = [p for p, c in kids if "tutk_client.py" in c]
+    others = [p for p, c in kids if "tutk_client.py" not in c]
+    return pythons, others, sorted(wrappers)
+
+
+def _kill(pids, sig) -> None:
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except ProcessLookupError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            log(f"kill {p}: {e}")
+
+
+def _gone(pids, timeout: float) -> bool:
+    end = time.monotonic() + timeout
+    while True:
+        if not any(os.path.exists(f"/proc/{p}") for p in pids):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.25)
+
+
+def restart_producer(name: str) -> bool:
+    """SIGTERM the camera's tutk_client so it releases the camera session
+    cleanly (its SIGTERM handler runs stream_once's teardown), lets ffmpeg hit
+    EOF and exit, and go2rtc relaunches the exec — with a fresh KMS key — on the
+    next consumer connect (the keepalive, or our own next probe)."""
+    pythons, others, wrappers = producer_pids(name)
+    if not (pythons or others or wrappers):
+        log(f"{name}: no stream process found to restart "
+            "(go2rtc relaunches it on the next consumer connect)")
+        return False
+    log(f"{name}: SIGTERM tutk_client {pythons} (clean camera-session release)")
+    _kill(pythons, signal.SIGTERM)
+    if pythons and not _gone(pythons, 6):
+        log(f"{name}: tutk_client ignored SIGTERM for 6s -> SIGKILL")
+        _kill(pythons, signal.SIGKILL)
+        _gone(pythons, 2)
+    rest = others + wrappers
+    if rest and not _gone(rest, 4):        # ffmpeg normally exits on EOF by itself
+        _kill(rest, signal.SIGTERM)
+        if not _gone(rest, 3):
+            _kill(rest, signal.SIGKILL)
+    log(f"{name}: stream process stopped — go2rtc relaunches it on the next "
+        "consumer connect (keepalive/probe, a few seconds)")
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# stage 2: restart the whole container
+# --------------------------------------------------------------------------- #
+def restart_container() -> None:
     # go2rtc is PID 1 (start-bionic.sh execs it); killing it exits the container
     # so Docker's restart policy relaunches with a fresh login + fresh KMS creds.
     log("killing go2rtc (PID 1) so Docker restarts the container with fresh creds")
@@ -90,35 +224,182 @@ def _restart() -> None:
         pass
     time.sleep(6)
     try:  # belt-and-suspenders if go2rtc wasn't PID 1 for some reason
-        os.kill(1, 15)
+        os.kill(1, signal.SIGTERM)
     except Exception:  # noqa: BLE001
         pass
+
+
+# --------------------------------------------------------------------------- #
+# the ladder
+# --------------------------------------------------------------------------- #
+class Watchdog:
+    """Per-camera escalation state machine. Every dependency (probe, restart
+    actions, clocks, state file, logger) is injectable so the ladder is unit-
+    testable without a camera or a container."""
+
+    def __init__(self, names=_names, alive=_alive,
+                 restart_producer=restart_producer,
+                 restart_container=restart_container,
+                 now=time.monotonic, wall=time.time,
+                 state_path: str | None = STATE_PATH, log=log,
+                 stall: int = STALL, producer_restarts: int = PRODUCER_RESTARTS,
+                 cooldown: int = COOLDOWN, cooldown_max: int = COOLDOWN_MAX,
+                 healthy_reset: int = HEALTHY_RESET):
+        self.names, self.alive = names, alive
+        self.restart_producer, self.restart_container = restart_producer, restart_container
+        self.now, self.wall, self.log = now, wall, log
+        self.state_path = state_path
+        self.stall, self.max_producer = stall, producer_restarts
+        self.cooldown, self.cooldown_max, self.healthy_reset = cooldown, cooldown_max, healthy_reset
+        self.state = self._load_state()
+        self.bad_since: dict[str, float] = {}      # name -> monotonic first-dead
+        self.last_action: dict[str, float] = {}    # name -> monotonic last restart
+        self.producer_count: dict[str, int] = {}   # name -> stage-1 restarts this outage
+        self.cams: dict[str, dict] = {}            # name -> status for the state file
+        self.all_healthy_since: float | None = None
+        self.container_restarted = False
+
+    # -- persisted state ---------------------------------------------------- #
+    def _load_state(self) -> dict:
+        st = {"container_restarts": {"last": None, "consecutive": 0}}
+        if not self.state_path:
+            return st
+        try:
+            with open(self.state_path) as fh:
+                data = json.load(fh) or {}
+            cr = data.get("container_restarts") or {}
+            st["container_restarts"] = {
+                "last": cr.get("last") if isinstance(cr.get("last"), (int, float)) else None,
+                "consecutive": int(cr.get("consecutive") or 0),
+            }
+        except Exception:  # noqa: BLE001  (missing / corrupt -> fresh)
+            pass
+        return st
+
+    def _write_state(self) -> None:
+        if not self.state_path:
+            return
+        cr = self.state["container_restarts"]
+        doc = {
+            "updated": self.wall(),
+            "cameras": self.cams,
+            "container_restarts": dict(cr, allowed_at=self.container_allowed_at()),
+            "config": {"stall": self.stall, "producer_restarts": self.max_producer,
+                       "cooldown": self.cooldown, "cooldown_max": self.cooldown_max,
+                       "healthy_reset": self.healthy_reset},
+        }
+        try:
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+            cs._atomic_write(self.state_path, json.dumps(doc, indent=1))
+        except Exception:  # noqa: BLE001  (read-only /config: run without persistence)
+            pass
+
+    def container_allowed_at(self) -> float:
+        cr = self.state["container_restarts"]
+        last, k = cr.get("last"), int(cr.get("consecutive") or 0)
+        if not last or k <= 0:
+            return 0.0
+        return float(last) + min(self.cooldown * (2 ** (k - 1)), self.cooldown_max)
+
+    # -- one probe cycle ---------------------------------------------------- #
+    def tick(self) -> None:
+        now = self.now()
+        names = self.names()
+        any_bad = False
+        for name in names:
+            if self.alive(name):
+                if name in self.bad_since:
+                    n = self.producer_count.get(name, 0)
+                    self.log(f"{name}: recovered after {int(now - self.bad_since[name])}s "
+                             f"({n} stream restart{'s' if n != 1 else ''})")
+                self.bad_since.pop(name, None)
+                self.last_action.pop(name, None)
+                self.producer_count.pop(name, None)
+                self.cams[name] = {"alive": True, "last_alive": self.wall(),
+                                   "stalled_since": None, "producer_restarts": 0}
+                continue
+            any_bad = True
+            self._handle_dead(name, now)
+        for gone in [n for n in list(self.bad_since) if n not in names]:
+            self.bad_since.pop(gone, None); self.last_action.pop(gone, None)
+            self.producer_count.pop(gone, None)
+        for gone in [n for n in list(self.cams) if n not in names]:
+            self.cams.pop(gone, None)
+        # A long all-healthy stretch forgives past container restarts, so the
+        # next genuine wedge gets the short cooldown again.
+        cr = self.state["container_restarts"]
+        if names and not any_bad:
+            if self.all_healthy_since is None:
+                self.all_healthy_since = now
+            elif cr.get("consecutive") and now - self.all_healthy_since >= self.healthy_reset:
+                self.log(f"all cameras healthy for {self.healthy_reset}s — "
+                         "container-restart cooldown reset")
+                cr["consecutive"] = 0
+        else:
+            self.all_healthy_since = None
+        self._write_state()
+
+    def _handle_dead(self, name: str, now: float) -> None:
+        since = self.bad_since.setdefault(name, now)
+        dead = int(now - since)
+        waited = now - self.last_action.get(name, since)
+        n = self.producer_count.get(name, 0)
+        cam = self.cams.setdefault(name, {})
+        cam.update({"alive": False, "stalled_since": cam.get("stalled_since") or self.wall(),
+                    "producer_restarts": n})
+        if waited < self.stall:
+            self.log(f"{name}: no video for {dead}s "
+                     f"(next action in {int(self.stall - waited)}s)")
+            return
+        if n < self.max_producer:
+            self.log(f"{name}: stalled {dead}s -> stage 1: restarting this camera's "
+                     f"stream process ({n + 1}/{self.max_producer})")
+            self._stage1(name, now)
+            return
+        allowed_at = self.container_allowed_at()
+        wall = self.wall()
+        if wall < allowed_at:
+            self.log(f"{name}: still dead after {n} stream restarts; a container restart "
+                     f"is on cooldown for {int(allowed_at - wall)}s more -> stage 1 again")
+            self._stage1(name, now)
+            return
+        cr = self.state["container_restarts"]
+        cr["last"] = wall
+        cr["consecutive"] = int(cr.get("consecutive") or 0) + 1
+        self.log(f"{name}: still dead after {n} stream restarts -> stage 2: restarting "
+                 f"the container (restart #{cr['consecutive']} in this run of trouble; "
+                 f"next one allowed no sooner than {int(self.container_allowed_at() - wall)}s "
+                 "after it)")
+        self.last_action[name] = now
+        self._write_state()
+        self.container_restarted = True
+        self.restart_container()
+
+    def _stage1(self, name: str, now: float) -> None:
+        try:
+            self.restart_producer(name)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"{name}: stream restart failed: {e}")
+        self.producer_count[name] = self.producer_count.get(name, 0) + 1
+        self.last_action[name] = now
+        self.cams[name]["producer_restarts"] = self.producer_count[name]
 
 
 def main() -> None:
     if os.environ.get("OWLET_WATCHDOG", "1") == "0":
         return
     time.sleep(GRACE)
-    bad_since: dict[str, float] = {}
+    wd = Watchdog()
+    cr = wd.state["container_restarts"]
+    if cr.get("consecutive"):
+        log(f"resumed after a self-healing container restart (#{cr['consecutive']}); "
+            f"next container restart allowed in "
+            f"{max(0, int(wd.container_allowed_at() - time.time()))}s, stream-level "
+            "restarts are not rate-limited")
     while True:
-        now = time.monotonic()
-        names = _names()
-        for name in names:
-            if _alive(name):
-                if name in bad_since:
-                    log(f"{name}: recovered")
-                bad_since.pop(name, None)
-                continue
-            since = bad_since.setdefault(name, now)
-            dead = int(now - since)
-            log(f"{name}: no video for {dead}s (restart at {STALL}s)")
-            if now - since >= STALL:
-                log(f"{name} stalled >= {STALL}s -> self-healing restart")
-                _restart()
-                return
-        # forget cameras removed from the config
-        for gone in [n for n in list(bad_since) if n not in names]:
-            bad_since.pop(gone, None)
+        wd.tick()
+        if wd.container_restarted:
+            return  # PID 1 is going down; nothing more to do
         time.sleep(INTERVAL)
 
 

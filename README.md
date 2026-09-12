@@ -167,6 +167,15 @@ The `PUBLIC_*` vars just tell the UI which host ports you mapped, so the copy‑
 
 ## Features in detail
 
+### Self‑healing streams
+The camera's single P2P session can silently wedge (video stops, audio keeps
+flowing). Three layers put it back without you touching anything: the stream
+process notices its own frame clock stopping (~30 s) and reconnects; the
+container watchdog restarts just that camera's stream process if it doesn't
+(2 min); and only as a last, rate‑limited resort restarts the container. Live
+counters are in `/api/status` → `watchdog`. Details, timings and the field data
+behind them: [docs/self-heal.md](native-bridge/docs/self-heal.md).
+
 ### Two‑way audio (talk‑back)
 
 Open the **🎙️ Talk & sounds** card. The **🎤 Hold to talk** button captures your microphone in real time, encodes it to AAC‑LC 8 kHz mono (matching the format the Owlet app uses), and pushes it to the camera's speaker over the Kalay AV server channel.
@@ -278,6 +287,9 @@ Everything's set in the web UI; these env vars override or tune it:
 |---|---|---|
 | `PUBLIC_HTTP_PORT` / `PUBLIC_RTSP_PORT` / `PUBLIC_WEBRTC_PORT` | `1984` / `8554` / `8555` | the **host** ports you mapped, so the UI shows reachable URLs |
 | `OWLET_KEEPALIVE` | `1` | keep one camera session warm 24/7 (auto‑reconnect). **Leave on.** |
+| `OWLET_STALL_TIMEOUT` | `30` | seconds without a video frame before the stream process unblocks/relaunches itself (see [Self‑healing](native-bridge/docs/self-heal.md)) |
+| `OWLET_WATCHDOG` | `1` | container watchdog: restart a dead camera's stream process, then (rate‑limited) the container |
+| `OWLET_WATCHDOG_STALL` / `_PRODUCER_RESTARTS` / `_COOLDOWN` | `120` / `2` / `300` | seconds between watchdog actions · stream restarts before a container restart · minimum seconds between container restarts (doubles each time, resets after 15 min healthy) |
 | `OWLET_AV_SECURITY_MODE` | *(auto)* | pin `0` Simple / `1` Dtls / `2` Auto |
 | `OWLET_REGION_CODE` | `3` | TUTK region (US = 3) |
 | `OWLET_IOTYPE_START` | `511` | start‑video IOCTL |
@@ -297,6 +309,7 @@ Everything's set in the web UI; these env vars override or tune it:
 | **Port conflict with Frigate** | Frigate owns `1984/8554/8555`; the template already offsets the bridge to `1985/18554/18555`. |
 | **"Open video UI" / copy buttons don't work** | Set the `PUBLIC_*` env vars and pull `:latest` (clipboard is blocked on plain http — the new UI falls back). |
 | **Stream pops in and out** | Close the **Owlet app on all phones** — the cam allows one session and they fight. Keep `OWLET_KEEPALIVE` on. Check `docker exec owlet-bridge-native tail -50 /config/tutk.log`. |
+| **Video freezes a minute or two after (re)connecting, audio keeps going** | A wedged TUTK session with the stream's main thread blocked. The bridge now fixes this itself in ~30–90 s (`[stall]` lines in `/config/tutk-<camera>.log` show what was blocked); the container watchdog backs that up. See [Self‑healing](native-bridge/docs/self-heal.md) — and open `/api/status` → `watchdog` for live counters. |
 | **High CPU in Frigate** | Disable **birdseye** for the Owlet camera — it was decoding the full 1440p feed for the mosaic. |
 | **`MISSING …libIOTCAPIs.so`** | Upload your Owlet APK in the **TUTK libraries** card (or drop it in the config folder). |
 | **🎤 mic button is greyed out** | The browser requires HTTPS for microphone access. Open the panel on `https://` and accept the self‑signed cert warning. |

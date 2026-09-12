@@ -14,7 +14,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    # Stdlib-only unit tests for the self-heal ladder (watchdog.py). Fast, and
+    # they gate the image build so a broken watchdog can't ship.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m unittest discover -s native-bridge/bridge/tests -v
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

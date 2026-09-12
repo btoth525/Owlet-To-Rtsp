@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import socket
@@ -709,6 +710,17 @@ def _have_libs() -> bool:
         return os.path.exists(os.path.join(TUTK_LIB_DIR, "libIOTCAPIs.so"))
 
 
+def _watchdog_state():
+    """Live self-heal status written by watchdog.py: per-camera liveness,
+    stage-1 (stream) restart counts and the container-restart cooldown.
+    None until the watchdog's first probe (or if OWLET_WATCHDOG=0)."""
+    try:
+        with open(os.path.join(cs.CONFIG_DIR, "vitals", "watchdog.json")) as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.get("/api/status")
 def status():
     cfg = cs.load_config()
@@ -726,6 +738,7 @@ def status():
         "streams_live": live,
         "rtsp_port": PUBLIC_RTSP_PORT, "http_port": PUBLIC_HTTP_PORT,
         "webrtc_port": PUBLIC_WEBRTC_PORT,
+        "watchdog": _watchdog_state(),
     })
 
 
