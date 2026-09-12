@@ -188,8 +188,8 @@ class NamesTests(unittest.TestCase):
     def test_only_connectable_cameras(self):
         cfg = {"email": "e", "password": "p", "cameras": [
             {"name": "owlet", "uid": "ABCDEFGHIJKLMNOPQRST"},   # saved key
-            {"name": "nursery2", "dsn": "OCD123"},               # key via KMS
-            {"name": "draft", "uid": "", "dsn": ""},             # nothing yet
+            {"name": "nursery2", "camera_dsn": "OCD123"},               # key via KMS
+            {"name": "draft", "uid": "", "camera_dsn": ""},             # nothing yet
         ]}
         self.assertEqual(wd._names(cfg), ["owlet", "nursery2"])
         cfg.pop("password")                                      # no login -> DSN alone is useless

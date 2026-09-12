@@ -114,7 +114,7 @@ def _names(cfg: dict | None = None) -> list[str]:
         cfg = cfg if cfg is not None else cs.load_config()
         have_login = bool(cfg.get("email") and cfg.get("password"))
         return [c["name"] for c in (cfg.get("cameras") or [])
-                if c.get("name") and (c.get("uid") or (c.get("dsn") and have_login))]
+                if c.get("name") and (c.get("uid") or (c.get("camera_dsn") and have_login))]
     except Exception:  # noqa: BLE001
         return []
 
