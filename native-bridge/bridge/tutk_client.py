@@ -48,7 +48,7 @@ from ctypes import (
     c_char_p,
     c_int,
     c_ubyte,
-    c_uint,
+    c_uint, c_void_p,
     create_string_buffer,
 )
 
@@ -127,7 +127,15 @@ IOTC_SESSION_MODE_FAIL = 0xFFFFFFFF   # nMode is unsigned; SDK reports failure a
 # change added it. Ship logging-only, watch a dozen real connect cycles, confirm
 # the 30-90s deaths are actually the relay-mode sessions, THEN flip this on. Do
 # not default it to on before that correlation is confirmed (see TOT-35 review).
-REQUIRE_P2P = os.environ.get("OWLET_REQUIRE_P2P", "0") != "0"
+# 2026-09-12: DEFAULT OFF, and opt-in only. The first production run of this
+# check (Owlet Cam, Kalay libs from app 3.35.1) crashed the stream process right
+# after every connect: the lib fills a struct far larger than the two-uint
+# SessionModeVer below (the garbage "mode" values were ASCII from the UID), so
+# the 8-byte ctypes struct was overrun and the process segfaulted — go2rtc
+# relaunched it ~60x/min and the Owlet KMS rate-limited the account (HTTP 429).
+# When enabled it now passes a 512-byte buffer and only reports the raw bytes.
+SESSION_CHECK = os.environ.get("OWLET_SESSION_CHECK", "0") != "0"
+REQUIRE_P2P = SESSION_CHECK and os.environ.get("OWLET_REQUIRE_P2P", "0") != "0"
 P2P_RETRY_LIMIT = int(os.environ.get("OWLET_P2P_RETRY_LIMIT") or "2")
 P2P_RETRY_WAIT = float(os.environ.get("OWLET_P2P_RETRY_WAIT") or "1.5")
 
@@ -1085,17 +1093,25 @@ def _session_mode(iotc: CDLL, session: int) -> int:
     audit can correlate mode against how long the session survived. Returns
     IOTC_SESSION_MODE_FAIL if the call is unavailable or errors — callers must
     not enforce on that value, only log it."""
+    if not SESSION_CHECK:
+        return IOTC_SESSION_MODE_FAIL   # opt-in only (OWLET_SESSION_CHECK=1), see above
     if not hasattr(iotc, "IOTC_Session_Check"):
         log("IOTC_Session_Check not exported by this lib build — mode unknown")
         return IOTC_SESSION_MODE_FAIL
-    smv = SessionModeVer()
-    rc = iotc.IOTC_Session_Check(session, byref(smv))
+    # The struct this lib build fills is NOT the two-uint SessionModeVer (it
+    # overran it and crashed the process in production). Hand it a buffer big
+    # enough for any known st_SInfo/st_SInfoEx layout and report the raw head so
+    # the real layout can be worked out from logs; the first byte is nMode in the
+    # Ex layouts (uint8), which is all the enforcement path looks at.
+    buf = create_string_buffer(512)
+    rc = iotc.IOTC_Session_Check(session, buf)
     if rc < 0:
         log(f"IOTC_Session_Check -> rc={rc} (mode unknown)")
         return IOTC_SESSION_MODE_FAIL
-    mode = smv.nMode
-    log(f"IOTC_Session_Check -> mode={SESSION_MODE_NAMES.get(mode, f'unknown({mode})')} "
-        f"({mode}) apiLevel={smv.nApiLevel}")
+    head = buf.raw[:32]
+    mode = head[0]
+    log(f"IOTC_Session_Check -> rc={rc} mode={SESSION_MODE_NAMES.get(mode, f'unknown({mode})')} "
+        f"raw[0:32]={head.hex()}")
     return mode
 
 
@@ -1111,7 +1127,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
              [c_char_p, c_int, POINTER(St_IOTCConnectInput)])
     _set_sig(iotc, "IOTC_Connect_ByUID_Parallel", c_int, [c_char_p, c_int])
     _set_sig(iotc, "IOTC_Session_Close", c_int, [c_int])
-    _set_sig(iotc, "IOTC_Session_Check", c_int, [c_int, POINTER(SessionModeVer)])
+    _set_sig(iotc, "IOTC_Session_Check", c_int, [c_int, c_void_p])
     _set_sig(iotc, "IOTC_DeInitialize", c_int, [])
     _set_sig(av, "avInitialize", c_int, [c_int])
     _set_sig(av, "avDeInitialize", c_int, [])
