@@ -27,13 +27,29 @@ Evidence from one camera, 2026‑09‑11 (Unraid, `:beta` image from July):
   held the camera's single P2P slot for ~20 s, the relaunched process often got a
   dud session and the cycle repeated. Restarting *more* made it *worse*.
 
+## What the first real stall showed (2026-09-12 10:07, new image)
+
+Frigate restarted at 10:06 and the stream wedged as usual. The supervisor fired
+30 s later with the diagnostic: the main thread was blocked in **`pipe_write`**
+— not in the TUTK lib. ffmpeg had stopped draining the pipe because *its* socket
+to go2rtc was full: `/proc/net/tcp` showed the producer connection in FIN_WAIT1
+with 2.6 MB unsent, and go2rtc's `/api/streams` kept listing that dead producer
+with **zero consumers**. go2rtc 1.9.4 had stopped reading the producer — a
+fan-out wedged on a consumer that went away with the Frigate restart. Killing
+our processes (hard exit, then the watchdog's stage 1) changed nothing: go2rtc
+never relaunched the exec, and only the stage-2 container restart brought the
+camera back (7 min dark). Since go2rtc's `DELETE`/`PUT /api/streams` merely swap
+the map entry (`streams.New()`, no Stop), the fix is to **replace the stream
+object** at stall time: the wedged one leaks, every new consumer lands on a
+fresh stream and a fresh exec. Both layers now do that (see below).
+
 ## The three layers
 
 | Layer | Where | Trigger | Action | Typical time to video |
 |---|---|---|---|---|
 | **0 · frame loop** | `tutk_client.py` main thread | `avRecvFrameData2` returns *no data* for `OWLET_NO_VIDEO_TIMEOUT` (15 s) | returns, waits `OWLET_RECONNECT_WAIT` (25 s), reconnects with a fresh KMS key | ~45 s |
-| **1 · stall supervisor** *(new)* | `tutk_client.py` side thread | no video frame forwarded for `OWLET_STALL_TIMEOUT` (30 s) **and** layer 0 didn't fire → the main thread is blocked | logs the main thread's kernel wait channel + a stack dump of every thread; calls `avClientStop()` to break a receive blocked in the lib → layer 0 takes over and reconnects cleanly; if the thread still isn't back after `OWLET_STALL_UNBLOCK_WAIT` (8 s) → `os._exit` so go2rtc relaunches the exec | ~40–90 s |
-| **2 · container watchdog, stage 1** *(new)* | `watchdog.py` | go2rtc's RTSP for the camera serves no video for `OWLET_WATCHDOG_STALL` (120 s) | `SIGTERM` **only that camera's** `tutk_client` (its handler releases the camera session cleanly), ffmpeg hits EOF, go2rtc relaunches the exec on the next consumer connect — the watchdog's own next probe is a consumer. go2rtc, the UI and other cameras stay up. Repeated `OWLET_WATCHDOG_PRODUCER_RESTARTS` (2) times, 120 s apart. | ~2–4 min |
+| **1 · stall supervisor** *(new)* | `tutk_client.py` side thread | no video frame forwarded for `OWLET_STALL_TIMEOUT` (30 s) **and** layer 0 didn't fire → the main thread is blocked | logs the main thread's kernel wait channel + a stack dump of every thread; calls `avClientStop()` to break a receive blocked in the lib → layer 0 takes over and reconnects cleanly; if the thread still isn't back after `OWLET_STALL_UNBLOCK_WAIT` (8 s) → replaces the go2rtc stream object (`PUT /api/streams`), kills the ffmpeg on our stdout pipe (found by pipe inode), then `os._exit` so the stream relaunches | ~40–90 s |
+| **2 · container watchdog, stage 1** *(new)* | `watchdog.py` | go2rtc's RTSP for the camera serves no video for `OWLET_WATCHDOG_STALL` (120 s) | `SIGTERM` **only that camera's** `tutk_client` (its handler releases the camera session cleanly), kill any orphaned producer ffmpeg, and replace the camera's go2rtc stream object so a wedged fan-out cannot keep it dead; go2rtc relaunches the exec on the next consumer connect — the watchdog's own next probe is a consumer. go2rtc, the UI and other cameras stay up. Repeated `OWLET_WATCHDOG_PRODUCER_RESTARTS` (2) times, 120 s apart. | ~2–4 min |
 | **2 · container watchdog, stage 2** | `watchdog.py` | still dead after the stage‑1 attempts | kill go2rtc (PID 1) → Docker restarts the container (fresh login, fresh go2rtc). **Rate‑limited:** at most once per `OWLET_WATCHDOG_COOLDOWN` (300 s), doubling per consecutive restart up to `OWLET_WATCHDOG_COOLDOWN_MAX` (1800 s); the counter resets after `OWLET_WATCHDOG_HEALTHY_RESET` (900 s) of every camera healthy. While on cooldown the watchdog keeps doing stage 1. | ≥ 6 min |
 
 The stage‑1 delay (120 s) is deliberately longer than a full layer‑1 cycle

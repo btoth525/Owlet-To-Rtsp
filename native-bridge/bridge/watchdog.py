@@ -14,10 +14,13 @@ camera serves no video, climbs a ladder — cheapest fix first:
   stage 0  tutk_client.py's own stall supervisor (OWLET_STALL_TIMEOUT, ~30s) —
            runs inside the stream process, nothing to do here.
   stage 1  after OWLET_WATCHDOG_STALL seconds: SIGTERM that camera's
-           tutk_client (clean session release) so go2rtc relaunches ONLY that
-           stream with a fresh KMS key. go2rtc, the web UI, the other cameras
-           and this watchdog all stay up. Repeated OWLET_WATCHDOG_PRODUCER_RESTARTS
-           times, one STALL window apart.
+           tutk_client (clean session release), kill any orphaned producer
+           ffmpeg, and REPLACE the camera's go2rtc stream object (PUT
+           /api/streams) so a wedged go2rtc fan-out can't keep the stream
+           dead; go2rtc relaunches ONLY that stream with a fresh KMS key.
+           go2rtc, the web UI, the other cameras and this watchdog all stay
+           up. Repeated OWLET_WATCHDOG_PRODUCER_RESTARTS times, one STALL
+           window apart.
   stage 2  if the camera is still dead after those: kill go2rtc (PID 1) so
            Docker restarts the whole container (fresh login, fresh go2rtc).
            Rate-limited: a container restart is allowed at most once per
@@ -165,6 +168,36 @@ def producer_pids(name: str, procs=None) -> tuple[list[int], list[int], list[int
     return pythons, others, sorted(wrappers)
 
 
+def orphan_producer_ffmpegs(procs=None) -> list[int]:
+    """ffmpeg processes that repackage a tutk_client pipe into go2rtc (`-f h264 -i -`
+    ... `-f rtsp`) but whose parent is PID 1: their bash wrapper is gone, so the
+    python feeding them is dead and they only hold go2rtc's producer slot open
+    (seen 2026-09-12 10:08 after a hard exit). Always safe to kill."""
+    procs = _procs() if procs is None else procs
+    return sorted(p for p, pp, c in procs
+                  if pp == 1 and c.startswith("ffmpeg") and "-f h264 -i -" in c and "-f rtsp" in c)
+
+
+def reset_go2rtc_stream(name: str) -> bool:
+    """Replace the camera's go2rtc stream object (PUT /api/streams -> streams.New()).
+    go2rtc 1.9 can wedge a stream's fan-out on a consumer that stopped reading; it
+    then never reads the producer again, keeps the dead producer listed, and never
+    relaunches the exec. New() swaps the map entry: the wedged object leaks, new
+    consumers get a working stream and a fresh exec. Only a container restart used
+    to fix this (7-minute outage on 2026-09-12)."""
+    try:
+        import urllib.parse
+        import urllib.request
+        url = (f"http://127.0.0.1:{cs.G_HTTP}/api/streams?"
+               + urllib.parse.urlencode({"name": name, "src": cs._exec_source(name)}))
+        r = urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=5)
+        log(f"{name}: go2rtc stream object replaced (HTTP {r.status})")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"{name}: go2rtc stream reset failed: {e}")
+        return False
+
+
 def _kill(pids, sig) -> None:
     for p in pids:
         try:
@@ -191,10 +224,19 @@ def restart_producer(name: str) -> bool:
     EOF and exit, and go2rtc relaunches the exec — with a fresh KMS key — on the
     next consumer connect (the keepalive, or our own next probe)."""
     pythons, others, wrappers = producer_pids(name)
+    orphans = orphan_producer_ffmpegs()
+    if orphans:
+        log(f"{name}: killing orphaned producer ffmpeg {orphans} (feeder already dead, "
+            "only holding go2rtc's producer slot)")
+        _kill(orphans, signal.SIGTERM)
+        if not _gone(orphans, 3):
+            _kill(orphans, signal.SIGKILL)
     if not (pythons or others or wrappers):
-        log(f"{name}: no stream process found to restart "
-            "(go2rtc relaunches it on the next consumer connect)")
-        return False
+        log(f"{name}: no live stream process to restart")
+        # go2rtc may still think the (dead) producer is alive — swap the stream
+        # object so the next consumer connect really relaunches the exec.
+        reset_go2rtc_stream(name)
+        return bool(orphans)
     log(f"{name}: SIGTERM tutk_client {pythons} (clean camera-session release)")
     _kill(pythons, signal.SIGTERM)
     if pythons and not _gone(pythons, 6):
@@ -206,8 +248,11 @@ def restart_producer(name: str) -> bool:
         _kill(rest, signal.SIGTERM)
         if not _gone(rest, 3):
             _kill(rest, signal.SIGKILL)
-    log(f"{name}: stream process stopped — go2rtc relaunches it on the next "
-        "consumer connect (keepalive/probe, a few seconds)")
+    # Even with the processes gone, a wedged go2rtc stream object would never
+    # relaunch the exec; replace it so the next consumer connect starts fresh.
+    reset_go2rtc_stream(name)
+    log(f"{name}: stream process stopped and go2rtc stream replaced — relaunches on "
+        "the next consumer connect (keepalive/probe, a few seconds)")
     return True
 
 
