@@ -196,6 +196,24 @@ class NamesTests(unittest.TestCase):
         self.assertEqual(wd._names(cfg), ["owlet"])
 
 
+class OrphanFfmpegTests(unittest.TestCase):
+    def test_orphaned_producer_ffmpeg_is_found_others_are_not(self):
+        prod = ("ffmpeg -hide_banner -loglevel warning -fflags +genpts -use_wallclock_as_timestamps 1 "
+                "-analyzeduration 5000000 -probesize 5000000 -f h264 -i - -c:v copy -f rtsp "
+                "-rtsp_transport tcp rtsp://127.0.0.1:8554/abc")
+        procs = [
+            (1, 0, "go2rtc -config /config/go2rtc.gen.yaml"),
+            (52, 1, prod),                                   # orphan: wrapper gone -> target
+            (33, 1, "bash -c set -a; python3 /app/tutk_client.py 2>>/config/tutk-owlet.log | " + prod),
+            (40, 33, prod),                                  # live pipeline member -> not an orphan
+            (7173, 28, "ffmpeg -hide_banner -loglevel error -rtsp_transport tcp -rw_timeout 15000000 "
+                       "-i rtsp://127.0.0.1:8554/owlet -c copy -f mpegts /dev/null"),   # keepalive viewer
+            (80, 1, "ffprobe -v error -rtsp_transport tcp -i rtsp://127.0.0.1:8554/owlet"),
+        ]
+        self.assertEqual(wd.orphan_producer_ffmpegs(procs), [52])
+        self.assertEqual(wd.orphan_producer_ffmpegs([]), [])
+
+
 class ProducerPidTests(unittest.TestCase):
     WRAP = ("bash -c set -a; [ -f /config/cameras/owlet.env ] && . /config/cameras/owlet.env; "
             "python3 /app/tutk_client.py 2>>/config/tutk-owlet.log | ffmpeg -f h264 -i - "

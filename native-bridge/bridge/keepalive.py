@@ -26,6 +26,8 @@ def _spawn(name: str) -> subprocess.Popen:
     return subprocess.Popen(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
          "-rw_timeout", "15000000",   # bail if the stream stalls (don't hang the warm viewer)
+         "-timeout", "15000000",      # rtsp socket I/O timeout: rw_timeout alone did not fire on a
+                                      # starved interleaved-TCP session (viewer sat 4+ min with no data)
          "-i", url, "-c", "copy", "-f", "mpegts", "/dev/null"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

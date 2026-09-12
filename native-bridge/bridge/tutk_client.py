@@ -1406,6 +1406,80 @@ def _main_wchan() -> str:
         return "?"
 
 
+def _cam_name() -> str:
+    """This stream's camera name, recovered from the talk FIFO path the exec sets
+    (${TMPDIR}/owlet-talk-<name>)."""
+    base = os.path.basename(os.environ.get("OWLET_TALK_FIFO", ""))
+    return base[len("owlet-talk-"):] if base.startswith("owlet-talk-") else ""
+
+
+def _stdout_readers() -> list:
+    """PIDs whose stdin is the pipe we write video into — i.e. the ffmpeg go2rtc
+    spawned next to us. Found by pipe inode so we never guess by name."""
+    try:
+        ino = os.fstat(1).st_ino
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid():
+            continue
+        try:
+            if os.readlink(f"/proc/{d}/fd/0") == f"pipe:[{ino}]":
+                out.append(int(d))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _reset_go2rtc_stream(name: str) -> None:
+    """Replace this camera's go2rtc stream object with a fresh one (PUT /api/streams
+    -> streams.New()). Evidence 2026-09-12 10:07: on a stall the main thread was in
+    pipe_write, ffmpeg was stuck in send() with 2.6 MB unsent, and go2rtc had stopped
+    reading its producer (a fan-out wedged on a consumer that went away after a
+    Frigate restart). Killing our processes did not help — go2rtc kept the dead
+    producer listed and never relaunched the exec — only a container restart did.
+    go2rtc 1.9's DELETE/PUT only swap the map entry (no Stop), so the wedged object
+    leaks but every new consumer gets a working stream and a fresh exec."""
+    if not name:
+        return
+    try:
+        import urllib.parse
+        import urllib.request
+        import config_store as cs
+        url = (f"http://127.0.0.1:{cs.G_HTTP}/api/streams?"
+               + urllib.parse.urlencode({"name": name, "src": cs._exec_source(name)}))
+        r = urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=5)
+        log(f"[stall] go2rtc stream '{name}' replaced with a fresh object (HTTP {r.status})")
+    except Exception as e:  # noqa: BLE001
+        log(f"[stall] go2rtc stream reset failed: {e}")
+
+
+def _kill_downstream(pids: list) -> None:
+    """SIGTERM then SIGKILL the ffmpeg reading our stdout, so its socket to go2rtc
+    closes and the old producer is really gone."""
+    import signal as _sig
+    for sig, wait in ((_sig.SIGTERM, 2.0), (_sig.SIGKILL, 0.0)):
+        alive = []
+        for p in pids:
+            try:
+                os.kill(p, sig)
+                alive.append(p)
+            except ProcessLookupError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                log(f"[stall] kill {p}: {e}")
+        if not alive:
+            return
+        end = time.time() + wait
+        while time.time() < end and any(os.path.exists(f"/proc/{p}") for p in alive):
+            time.sleep(0.1)
+        pids = [p for p in alive if os.path.exists(f"/proc/{p}")]
+        if not pids:
+            return
+    log(f"[stall] downstream ffmpeg still present after SIGKILL: {pids}")
+
+
 def _stall_supervisor(av: CDLL, av_idx: int, st: dict, done: threading.Event) -> None:
     """Watch the video-frame clock from a side thread (see STALL_TIMEOUT).
 
@@ -1443,8 +1517,19 @@ def _stall_supervisor(av: CDLL, av_idx: int, st: dict, done: threading.Event) ->
         if done.wait(STALL_UNBLOCK_WAIT):
             log("[stall] frame loop is back — reconnecting normally")
             return
-        log(f"[stall] still blocked {STALL_UNBLOCK_WAIT}s after avClientStop — hard "
-            "exit so go2rtc relaunches this stream with a fresh key")
+        log(f"[stall] still blocked {STALL_UNBLOCK_WAIT}s after avClientStop — replacing "
+            "the go2rtc stream, killing the downstream ffmpeg, then hard exit so the "
+            "stream relaunches with a fresh key")
+        # Order matters: give go2rtc a fresh Stream object first (new consumers land
+        # on it), then close the old producer's socket by killing its ffmpeg, then
+        # die ourselves. The old wrapper exits on its own once both pipe ends are gone.
+        readers = _stdout_readers()
+        _reset_go2rtc_stream(_cam_name())
+        if readers:
+            log(f"[stall] killing downstream ffmpeg {readers} (it stopped draining our pipe)")
+            _kill_downstream(readers)
+        else:
+            log("[stall] no downstream ffmpeg found on our stdout pipe")
         try:
             sys.stderr.flush()
         except Exception:  # noqa: BLE001
