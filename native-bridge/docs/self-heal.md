@@ -58,6 +58,15 @@ in flight. TOT‑33's 45 s did exactly that.
 * Docker health (`docker inspect … .State.Health`) — `python3 watchdog.py --check`
   is the HEALTHCHECK; it only *reports*, the ladder above does the healing.
 
+## Also fixed on the way
+
+The old watchdog probed `config_store.camera_names()`, which answers a
+placeholder `owlet` when nothing is configured yet — so a fresh install with
+no camera added was "healed" into a container restart every couple of
+minutes. The watchdog now only probes cameras that can actually stream (a
+saved UID, or a DSN plus an account login); with none, it idles and the
+HEALTHCHECK reports healthy, as the docs always claimed.
+
 ## Tuning
 
 All env vars are optional; defaults are what the field data suggested.

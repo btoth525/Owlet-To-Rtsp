@@ -178,6 +178,24 @@ class LadderTests(unittest.TestCase):
         self.assertNotIn("nursery2", h.wd.cams)
 
 
+class NamesTests(unittest.TestCase):
+    def test_unconfigured_install_has_nothing_to_probe(self):
+        # config_store.camera_names() would answer ["owlet"] here (placeholder
+        # stream) — the watchdog must not probe a camera that cannot exist yet.
+        self.assertEqual(wd._names({"cameras": []}), [])
+        self.assertEqual(wd._names({}), [])
+
+    def test_only_connectable_cameras(self):
+        cfg = {"email": "e", "password": "p", "cameras": [
+            {"name": "owlet", "uid": "ABCDEFGHIJKLMNOPQRST"},   # saved key
+            {"name": "nursery2", "dsn": "OCD123"},               # key via KMS
+            {"name": "draft", "uid": "", "dsn": ""},             # nothing yet
+        ]}
+        self.assertEqual(wd._names(cfg), ["owlet", "nursery2"])
+        cfg.pop("password")                                      # no login -> DSN alone is useless
+        self.assertEqual(wd._names(cfg), ["owlet"])
+
+
 class ProducerPidTests(unittest.TestCase):
     WRAP = ("bash -c set -a; [ -f /config/cameras/owlet.env ] && . /config/cameras/owlet.env; "
             "python3 /app/tutk_client.py 2>>/config/tutk-owlet.log | ffmpeg -f h264 -i - "
