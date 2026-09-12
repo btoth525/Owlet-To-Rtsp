@@ -32,6 +32,7 @@ class Harness:
     def __init__(self, state_path=None, **kw):
         self.clock = FakeClock()
         self.alive_now = True
+        self.age = None
         self.producer_restarts = []
         self.container_restarts = 0
         self.logs = []
@@ -40,6 +41,7 @@ class Harness:
             restart_producer=self._rp, restart_container=self._rc,
             now=self.clock.now, wall=self.clock.wall,
             state_path=state_path, log=self.logs.append,
+            producer_age=lambda n: self.age,
             stall=120, producer_restarts=2, cooldown=300, cooldown_max=1800,
             healthy_reset=900, **kw)
 
@@ -176,6 +178,17 @@ class LadderTests(unittest.TestCase):
         h.run(15)
         self.assertNotIn("nursery2", h.wd.bad_since)
         self.assertNotIn("nursery2", h.wd.cams)
+
+    def test_young_stream_process_is_not_restarted(self):
+        h = Harness()
+        h.alive_now = False
+        h.age = 20            # the supervisor relaunched it 20 s ago
+        h.run(135)
+        self.assertEqual(h.producer_restarts, [])
+        self.assertIn("recovery in flight", " ".join(h.logs))
+        h.age = 300           # old process, still dead -> stage 1 as usual
+        h.run(120)
+        self.assertEqual(len(h.producer_restarts), 1)
 
 
 class NamesTests(unittest.TestCase):
