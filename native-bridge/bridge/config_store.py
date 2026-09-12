@@ -428,7 +428,7 @@ def generate(account: dict, cameras: list[dict]) -> str:
 # identical, never-started spares in the generated config, and on a wedge we point
 # the camera's name at the first unused spare: consumers land on a fresh object
 # whose exec launches on demand. The wedged object leaks until the next restart.
-SPARE_STREAMS = int(os.environ.get("OWLET_SPARE_STREAMS") or "4")
+SPARE_STREAMS = int(os.environ.get("OWLET_SPARE_STREAMS") or "8")
 
 
 def spare_names(name: str) -> list[str]:

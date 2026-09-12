@@ -78,6 +78,10 @@ PRODUCER_RESTARTS = int(os.environ.get("OWLET_WATCHDOG_PRODUCER_RESTARTS", "2"))
 COOLDOWN = int(os.environ.get("OWLET_WATCHDOG_COOLDOWN", "300"))
 COOLDOWN_MAX = int(os.environ.get("OWLET_WATCHDOG_COOLDOWN_MAX", "1800"))
 HEALTHY_RESET = int(os.environ.get("OWLET_WATCHDOG_HEALTHY_RESET", "900"))
+# A stream process younger than this is a recovery in flight (the in-process
+# stall supervisor sees a wedge ~60 s later than this probe does, because the
+# pipe/socket buffers absorb a minute of video first); never restart it.
+RECOVERY_GRACE = int(os.environ.get("OWLET_WATCHDOG_RECOVERY_GRACE", "90"))
 PROBE_TIMEOUT = 15
 STATE_PATH = os.path.join(cs.CONFIG_DIR, "vitals", "watchdog.json")
 
@@ -193,6 +197,31 @@ def reset_go2rtc_stream(name: str) -> bool:
         return False
 
 
+def producer_age(name: str) -> float | None:
+    """Seconds since the camera's tutk_client started, or None if none is running."""
+    pythons, _o, _w = producer_pids(name)
+    ages = []
+    for p in pythons:
+        try:
+            with open(f"/proc/{p}/stat") as fh:
+                start_ticks = int(fh.read().rsplit(")", 1)[1].split()[19])
+            with open("/proc/uptime") as fh:
+                up = float(fh.read().split()[0])
+            ages.append(up - start_ticks / os.sysconf("SC_CLK_TCK"))
+        except Exception:  # noqa: BLE001
+            continue
+    return min(ages) if ages else None
+
+
+def _alive_pid(p: int) -> bool:
+    """A zombie (not yet reaped by its parent) counts as gone."""
+    try:
+        with open(f"/proc/{p}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _kill(pids, sig) -> None:
     for p in pids:
         try:
@@ -206,7 +235,7 @@ def _kill(pids, sig) -> None:
 def _gone(pids, timeout: float) -> bool:
     end = time.monotonic() + timeout
     while True:
-        if not any(os.path.exists(f"/proc/{p}") for p in pids):
+        if not any(_alive_pid(p) for p in pids):
             return True
         if time.monotonic() >= end:
             return False
@@ -280,6 +309,7 @@ class Watchdog:
     def __init__(self, names=_names, alive=_alive,
                  restart_producer=restart_producer,
                  restart_container=restart_container,
+                 producer_age=producer_age, recovery_grace: int = RECOVERY_GRACE,
                  now=time.monotonic, wall=time.time,
                  state_path: str | None = STATE_PATH, log=log,
                  stall: int = STALL, producer_restarts: int = PRODUCER_RESTARTS,
@@ -287,6 +317,7 @@ class Watchdog:
                  healthy_reset: int = HEALTHY_RESET):
         self.names, self.alive = names, alive
         self.restart_producer, self.restart_container = restart_producer, restart_container
+        self.producer_age, self.recovery_grace = producer_age, recovery_grace
         self.now, self.wall, self.log = now, wall, log
         self.state_path = state_path
         self.stall, self.max_producer = stall, producer_restarts
@@ -390,6 +421,17 @@ class Watchdog:
         if waited < self.stall:
             self.log(f"{name}: no video for {dead}s "
                      f"(next action in {int(self.stall - waited)}s)")
+            return
+        try:
+            age = self.producer_age(name)
+        except Exception:  # noqa: BLE001
+            age = None
+        if age is not None and age < self.recovery_grace:
+            # The in-process supervisor (or a previous stage 1) just relaunched
+            # this stream; give it time instead of killing the fresh process.
+            self.log(f"{name}: stream process is only {int(age)}s old — recovery in "
+                     f"flight, holding off ({self.recovery_grace}s grace)")
+            self.last_action[name] = now - self.stall + self.recovery_grace
             return
         if n < self.max_producer:
             self.log(f"{name}: stalled {dead}s -> stage 1: restarting this camera's "
