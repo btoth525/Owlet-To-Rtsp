@@ -4,7 +4,7 @@
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
 export LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib
 
-mkdir -p /config 2>/dev/null
+mkdir -p /config /config/vitals 2>/dev/null
 if [ ! -f /config/owlet.env ]; then
   if ! (echo "# owlet-bridge" > /config/owlet.env) 2>/dev/null; then
     echo "[owlet-bridge/bionic] WARN: /config is not writable by this container."
@@ -91,10 +91,12 @@ if [ "${OWLET_VITALS_POLL:-1}" = "1" ]; then
   python3 /app/vitals_poller.py &
 fi
 
-# Self-heal a wedged P2P session: if a camera's RTSP serves no frames for a few
-# minutes straight, kill go2rtc so Docker restarts the container with a fresh
-# login + fresh KMS creds. Catches wedges that leave go2rtc alive (so Docker
-# would otherwise never restart it). Set OWLET_WATCHDOG=0 to disable.
+# Self-heal a wedged P2P session, cheapest fix first (see watchdog.py): if a
+# camera's RTSP serves no frames, first SIGTERM just that camera's tutk_client so
+# go2rtc relaunches the one stream with a fresh key (go2rtc, the UI and the other
+# cameras stay up); only if that fails twice, kill go2rtc so Docker restarts the
+# container — rate-limited with a doubling cooldown so a camera that is truly
+# offline can't churn Owlet cloud logins. Set OWLET_WATCHDOG=0 to disable.
 if [ "${OWLET_WATCHDOG:-1}" = "1" ]; then
   python3 /app/watchdog.py &
 fi

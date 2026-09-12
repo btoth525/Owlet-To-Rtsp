@@ -33,6 +33,21 @@ COPY templates /app/templates
 COPY static /app/static
 RUN chmod +x /app/start-bionic.sh
 
+# Our entrypoint = the stock Termux one + forwarding of the bridge's own
+# `docker -e` vars (OWLET_*, PUBLIC_*, GO2RTC_*, TUTK_*, CONFIG_PATH, ENV_PATH)
+# through the `su … env -i` wipe. Without it every template variable was
+# silently dropped before the app started.
+COPY entrypoint-bionic.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+# Standard shell paths. The Termux base has no /bin at all (its shells live
+# under /data/data/com.termux/files/usr/bin), which broke `docker exec … sh -c`,
+# the Unraid console button (<Shell>bash</Shell>) and any shell-form Docker
+# instruction. Symlinks make the image behave like a normal Linux container.
+RUN mkdir -p /bin \
+ && ln -sf /data/data/com.termux/files/usr/bin/sh /bin/sh \
+ && ln -sf /data/data/com.termux/files/usr/bin/bash /bin/bash
+
 ENV TUTK_LIB_DIR=/app/libs/x86_64 \
     LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
     PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin \
@@ -53,10 +68,9 @@ EXPOSE 8088 1984 8554 8555/tcp 8555/udp
 # (TOT-33 tuned both down together; see watchdog.py for the reasoning).
 HEALTHCHECK --interval=60s --timeout=25s --start-period=90s --retries=3 \
   CMD ["python3", "/app/watchdog.py", "--check"]
-# Keep the base image's Termux /entrypoint.sh (runs the bootstrap, sets up the
-# Termux userspace, then execs our CMD). Do NOT override ENTRYPOINT with an
-# explicit interpreter — this base has no /bin/bash (bash lives under
-# /data/data/com.termux/...), so e.g. `ENTRYPOINT ["/bin/bash", …]` crash-loops
-# the container. Configure via the UI/config (env-strip-proof) — docker -e vars
-# don't survive the Termux su on this base.
+# The ENTRYPOINT stays the base image's /entrypoint.sh path (ours, copied above:
+# drops to the Termux user, then execs our CMD). Do NOT override ENTRYPOINT with
+# an explicit interpreter — the entrypoint must run as root first so it can `su`
+# to the Termux user. The UI/config remains the primary way to configure the
+# bridge; the whitelisted docker -e vars are forwarded as overrides.
 CMD ["/app/start-bionic.sh"]

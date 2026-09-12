@@ -30,6 +30,7 @@ in TUTK_LIB_DIR.
 from __future__ import annotations
 
 import ctypes
+import faulthandler
 import fcntl
 import json
 import os
@@ -79,6 +80,19 @@ CONNECT_TIMEOUT = int(os.environ.get("OWLET_CONNECT_TIMEOUT") or "20")
 # hold before reconnecting (otherwise the next connect just races it again).
 NO_VIDEO_TIMEOUT = int(os.environ.get("OWLET_NO_VIDEO_TIMEOUT") or "15")
 RECONNECT_WAIT = int(os.environ.get("OWLET_RECONNECT_WAIT") or "25")  # > cam's 20s session hold
+
+# A session can ALSO wedge with the main thread blocked — inside avRecvFrameData2
+# (the lib never returns) or in the stdout write (ffmpeg stopped draining the
+# pipe). Then the NO_VIDEO_TIMEOUT check in the frame loop never runs: audio keeps
+# flowing from its own thread, nothing is logged, and only the container watchdog
+# notices minutes later. Field data 2026-09-11: 22 stalls in one day, every one of
+# them this shape — not a single "no video for 15s" line ever logged. A side thread
+# (_stall_supervisor) watches the frame clock instead; past STALL_TIMEOUT it dumps
+# every thread's stack to the log (so the wedge is finally diagnosable), calls
+# avClientStop() to break a recv blocked in the lib, and if the main thread still
+# isn't back after STALL_UNBLOCK_WAIT it hard-exits so go2rtc relaunches the exec.
+STALL_TIMEOUT = int(os.environ.get("OWLET_STALL_TIMEOUT") or "30")
+STALL_UNBLOCK_WAIT = int(os.environ.get("OWLET_STALL_UNBLOCK_WAIT") or "8")
 # AV layer (avClientStartEx, the path the Owlet app uses). security_mode:
 # 0=Simple 1=Dtls 2=Auto; auth_type: 0=Password 1=Token 2=Nebula. If
 # OWLET_AV_SECURITY_MODE is blank we auto-probe [Auto, Dtls, Simple] because the
@@ -1156,6 +1170,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
     session = -1
     av_idx = -1
     audio_stop = threading.Event()
+    loop_done = threading.Event()                  # stops the stall supervisor
+    vclock = {"video_at": time.time(), "frames": 0}  # shared with it
     audio_thr = None
     talk_thr = None
     sensors_thr = None
@@ -1299,6 +1315,9 @@ def stream_once(uid: str, sec_mode: int) -> int:
         frames = 0
         last_log = time.time()
         last_data = time.time()
+        vclock["video_at"] = last_data
+        threading.Thread(target=_stall_supervisor, name="stall-supervisor",
+                         args=(av, av_idx, vclock, loop_done), daemon=True).start()
         while True:
             rc = av.avRecvFrameData2(av_idx, buf, FRAME_BUF,
                                      byref(actual), byref(expected),
@@ -1309,6 +1328,8 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 out.write(memoryview(buf)[:actual.value]); out.flush()
                 frames += 1
                 last_data = time.time()
+                vclock["video_at"] = last_data
+                vclock["frames"] = frames
                 # temp/noise/motion/sound ride in the extended frame-info struct
                 _parse_frame_sensors(finfo.raw, finfo_len.value)
                 if time.time() - last_log > 15:
@@ -1332,6 +1353,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
                 time.sleep(0.02)
         return 0
     finally:
+        loop_done.set()   # the stall supervisor must not act during teardown
         # Signal the worker threads, then avClientStop FIRST — that unblocks any
         # thread parked inside avRecvAudioData/avRecvIOCtrl (which have their own
         # timeouts but can sit longer than the join). Joining BEFORE the stop
@@ -1355,6 +1377,63 @@ def stream_once(uid: str, sec_mode: int) -> int:
             iotc.IOTC_Session_Close(session)
         av.avDeInitialize()
         iotc.IOTC_DeInitialize()
+
+
+def _main_wchan() -> str:
+    """Kernel wait channel of the main thread — tells a blocked pipe write
+    (pipe_write) from a blocked socket/futex wait inside the TUTK lib."""
+    try:
+        tid = threading.main_thread().native_id or os.getpid()
+        with open(f"/proc/self/task/{tid}/wchan") as fh:
+            return fh.read().strip() or "0"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _stall_supervisor(av: CDLL, av_idx: int, st: dict, done: threading.Event) -> None:
+    """Watch the video-frame clock from a side thread (see STALL_TIMEOUT).
+
+    stream_once()'s own NO_VIDEO_TIMEOUT only works while the main thread keeps
+    returning from avRecvFrameData2 / the stdout write. When either blocks this
+    is the only thing that notices. Ladder:
+      1. log it, with the main thread's wait channel + every thread's Python
+         stack (the evidence TOT-35 was missing);
+      2. avClientStop() — unblocks a recv parked in the lib; the frame loop then
+         sees an error, hits its own timeout and reconnects CLEANLY (session
+         released, fresh KMS key, normal RECONNECT_WAIT);
+      3. if the main thread still hasn't come back after STALL_UNBLOCK_WAIT (e.g.
+         it's stuck in the pipe write), os._exit so go2rtc relaunches the exec.
+         The camera drops the abandoned slot after its 20s alive timeout, which
+         the relaunched process's dud-session handling already waits out."""
+    limit = max(STALL_TIMEOUT, NO_VIDEO_TIMEOUT + 10)
+    while not done.wait(1.0):
+        idle = time.time() - st["video_at"]
+        if idle < limit:
+            continue
+        log(f"[stall] no video forwarded for {int(idle)}s (frames={st['frames']}) and "
+            f"the frame loop never hit its own {NO_VIDEO_TIMEOUT}s timeout — main "
+            f"thread is blocked (wchan={_main_wchan()}); dumping thread stacks")
+        try:
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        log("[stall] avClientStop() to break the blocked receive …")
+        try:
+            rc = av.avClientStop(av_idx)
+            log(f"[stall] avClientStop -> {rc}")
+        except Exception as e:  # noqa: BLE001
+            log(f"[stall] avClientStop raised: {e}")
+        if done.wait(STALL_UNBLOCK_WAIT):
+            log("[stall] frame loop is back — reconnecting normally")
+            return
+        log(f"[stall] still blocked {STALL_UNBLOCK_WAIT}s after avClientStop — hard "
+            "exit so go2rtc relaunches this stream with a fresh key")
+        try:
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        os._exit(6)
 
 
 SEC_NAMES = {0: "Simple", 1: "Dtls", 2: "Auto"}
