@@ -38,18 +38,26 @@ with **zero consumers**. go2rtc 1.9.4 had stopped reading the producer — a
 fan-out wedged on a consumer that went away with the Frigate restart. Killing
 our processes (hard exit, then the watchdog's stage 1) changed nothing: go2rtc
 never relaunched the exec, and only the stage-2 container restart brought the
-camera back (7 min dark). Since go2rtc's `DELETE`/`PUT /api/streams` merely swap
-the map entry (`streams.New()`, no Stop), the fix is to **replace the stream
-object** at stall time: the wedged one leaks, every new consumer lands on a
-fresh stream and a fresh exec. Both layers now do that (see below).
+camera back (7 min dark). go2rtc's API refuses to create `exec:` sources dynamically (`PUT` → `New()` →
+`Validate()` rejects them, HTTP 400), but `PATCH ?name=X&src=<existing stream>`
+simply **aliases X to that stream's object**. So the generated config now carries
+four never-started identical spares per camera (`owlet_spare1..4`), and on a
+wedge both layers point the camera's name at the first unused spare: consumers
+land on a fresh object whose exec launches on demand, and the wedged object is
+abandoned until the next restart. Verified on an isolated go2rtc 1.9.4: a
+consumer that joined after the swap received frames from a new exec process
+while the old object kept serving its old consumer. A deliberately non-reading
+consumer did *not* reproduce the wedge on 1.9.4 or on the latest go2rtc, so the
+trigger is something in the Frigate-restart reconnect sequence, not raw
+back-pressure; the spare swap sidesteps it regardless of cause.
 
 ## The three layers
 
 | Layer | Where | Trigger | Action | Typical time to video |
 |---|---|---|---|---|
 | **0 · frame loop** | `tutk_client.py` main thread | `avRecvFrameData2` returns *no data* for `OWLET_NO_VIDEO_TIMEOUT` (15 s) | returns, waits `OWLET_RECONNECT_WAIT` (25 s), reconnects with a fresh KMS key | ~45 s |
-| **1 · stall supervisor** *(new)* | `tutk_client.py` side thread | no video frame forwarded for `OWLET_STALL_TIMEOUT` (30 s) **and** layer 0 didn't fire → the main thread is blocked | logs the main thread's kernel wait channel + a stack dump of every thread; calls `avClientStop()` to break a receive blocked in the lib → layer 0 takes over and reconnects cleanly; if the thread still isn't back after `OWLET_STALL_UNBLOCK_WAIT` (8 s) → replaces the go2rtc stream object (`PUT /api/streams`), kills the ffmpeg on our stdout pipe (found by pipe inode), then `os._exit` so the stream relaunches | ~40–90 s |
-| **2 · container watchdog, stage 1** *(new)* | `watchdog.py` | go2rtc's RTSP for the camera serves no video for `OWLET_WATCHDOG_STALL` (120 s) | `SIGTERM` **only that camera's** `tutk_client` (its handler releases the camera session cleanly), kill any orphaned producer ffmpeg, and replace the camera's go2rtc stream object so a wedged fan-out cannot keep it dead; go2rtc relaunches the exec on the next consumer connect — the watchdog's own next probe is a consumer. go2rtc, the UI and other cameras stay up. Repeated `OWLET_WATCHDOG_PRODUCER_RESTARTS` (2) times, 120 s apart. | ~2–4 min |
+| **1 · stall supervisor** *(new)* | `tutk_client.py` side thread | no video frame forwarded for `OWLET_STALL_TIMEOUT` (30 s) **and** layer 0 didn't fire → the main thread is blocked | logs the main thread's kernel wait channel + a stack dump of every thread; calls `avClientStop()` to break a receive blocked in the lib → layer 0 takes over and reconnects cleanly; if the thread still isn't back after `OWLET_STALL_UNBLOCK_WAIT` (8 s) → aliases the camera's go2rtc stream to an unused spare (`PATCH /api/streams`), kills the ffmpeg on our stdout pipe (found by pipe inode), then `os._exit` so the stream relaunches | ~40–90 s |
+| **2 · container watchdog, stage 1** *(new)* | `watchdog.py` | go2rtc's RTSP for the camera serves no video for `OWLET_WATCHDOG_STALL` (120 s) | `SIGTERM` **only that camera's** `tutk_client` (its handler releases the camera session cleanly), kill any orphaned producer ffmpeg, and alias the camera's go2rtc stream to an unused spare so a wedged fan-out cannot keep it dead (no spare left → escalate); go2rtc relaunches the exec on the next consumer connect — the watchdog's own next probe is a consumer. go2rtc, the UI and other cameras stay up. Repeated `OWLET_WATCHDOG_PRODUCER_RESTARTS` (2) times, 120 s apart. | ~2–4 min |
 | **2 · container watchdog, stage 2** | `watchdog.py` | still dead after the stage‑1 attempts | kill go2rtc (PID 1) → Docker restarts the container (fresh login, fresh go2rtc). **Rate‑limited:** at most once per `OWLET_WATCHDOG_COOLDOWN` (300 s), doubling per consecutive restart up to `OWLET_WATCHDOG_COOLDOWN_MAX` (1800 s); the counter resets after `OWLET_WATCHDOG_HEALTHY_RESET` (900 s) of every camera healthy. While on cooldown the watchdog keeps doing stage 1. | ≥ 6 min |
 
 The stage‑1 delay (120 s) is deliberately longer than a full layer‑1 cycle
@@ -89,6 +97,7 @@ All env vars are optional; defaults are what the field data suggested.
 
 | Var | Default | Meaning |
 |---|---|---|
+| `OWLET_SPARE_STREAMS` | `4` | identical never-started go2rtc spare streams per camera, one consumed per wedge recovery between container restarts |
 | `OWLET_STALL_TIMEOUT` | `30` | seconds without a forwarded video frame before layer 1 acts (kept ≥ `OWLET_NO_VIDEO_TIMEOUT` + 10) |
 | `OWLET_STALL_UNBLOCK_WAIT` | `8` | seconds to give `avClientStop()` before the hard exit |
 | `OWLET_WATCHDOG` | `1` | `0` disables the container watchdog entirely |

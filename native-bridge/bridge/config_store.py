@@ -386,6 +386,12 @@ def render_go2rtc(cameras: list[dict], candidate: str | None = None) -> str:
         nm = slugify(cam.get("name") or "")  # never interpolate a raw name
         lines.append(f"  {nm}:")
         lines.append("    - " + _exec_source(nm))
+        # Never-started identical spares: on a go2rtc fan-out wedge the watchdog /
+        # stall supervisor alias the camera name to one of these (see
+        # go2rtc_swap_to_spare). Cost nothing until used.
+        for sp in spare_names(nm):
+            lines.append(f"  {sp}:")
+            lines.append("    - " + _exec_source(nm))
         # Optional glass-HUD variant, on-demand (free unless viewed).
         lines.append(f"  {nm}_overlay:")
         lines.append("    - " + _overlay_source(nm))
@@ -407,6 +413,64 @@ def generate(account: dict, cameras: list[dict]) -> str:
         or os.environ.get("OWLET_WEBRTC_CANDIDATE", "")
     _atomic_write(GEN_PATH, render_go2rtc(render_cams, candidate=cand))
     return GEN_PATH
+
+
+
+# --------------------------------------------------------------------------- #
+# go2rtc self-heal: spare streams + alias swap
+# --------------------------------------------------------------------------- #
+# go2rtc 1.9 can wedge a stream's fan-out (2026-09-12: after a Frigate restart it
+# stopped reading the exec producer — 2.6 MB unsent on ffmpeg's socket — kept the
+# dead producer listed and never relaunched the exec; only a container restart
+# helped). Its API refuses to create exec sources dynamically (PUT -> New() ->
+# Validate() rejects "dynamic sources"), but PATCH ?name=X&src=<existing stream>
+# simply aliases X to that stream's object. So every camera gets SPARE_STREAMS
+# identical, never-started spares in the generated config, and on a wedge we point
+# the camera's name at the first unused spare: consumers land on a fresh object
+# whose exec launches on demand. The wedged object leaks until the next restart.
+SPARE_STREAMS = int(os.environ.get("OWLET_SPARE_STREAMS") or "4")
+
+
+def spare_names(name: str) -> list[str]:
+    return [f"{name}_spare{i}" for i in range(1, SPARE_STREAMS + 1)]
+
+
+def pick_spare(name: str, streams: dict) -> str | None:
+    """First spare of `name` that go2rtc has never handed to a consumer
+    (its "consumers" is null until first use; [] afterwards)."""
+    for sp in spare_names(name):
+        info = streams.get(sp)
+        if info is not None and info.get("consumers") is None:
+            return sp
+    return None
+
+
+def go2rtc_swap_to_spare(name: str, log=None) -> str | None:
+    """Alias go2rtc stream `name` to its next unused spare. Returns the spare
+    name on success, None if none are left (caller escalates)."""
+    import json as _json
+    import urllib.request
+    say = log or (lambda m: None)
+    api = f"http://127.0.0.1:{G_HTTP}/api/streams"
+    try:
+        streams = _json.load(urllib.request.urlopen(api, timeout=5))
+    except Exception as e:  # noqa: BLE001
+        say(f"{name}: go2rtc API unreachable ({e})")
+        return None
+    sp = pick_spare(name, streams)
+    if sp is None:
+        say(f"{name}: no unused spare go2rtc stream left ({SPARE_STREAMS} configured) — "
+            "a container restart is the only reset now")
+        return None
+    try:
+        req = urllib.request.Request(f"{api}?name={name}&src={sp}", method="PATCH")
+        r = urllib.request.urlopen(req, timeout=5)
+        say(f"{name}: go2rtc stream aliased to fresh spare '{sp}' (HTTP {r.status}); "
+            "the wedged object is abandoned")
+        return sp
+    except Exception as e:  # noqa: BLE001
+        say(f"{name}: go2rtc alias swap to '{sp}' failed: {e}")
+        return None
 
 
 def camera_names(cfg: dict | None = None) -> list[str]:

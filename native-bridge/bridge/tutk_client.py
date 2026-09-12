@@ -1433,26 +1433,22 @@ def _stdout_readers() -> list:
 
 
 def _reset_go2rtc_stream(name: str) -> None:
-    """Replace this camera's go2rtc stream object with a fresh one (PUT /api/streams
-    -> streams.New()). Evidence 2026-09-12 10:07: on a stall the main thread was in
-    pipe_write, ffmpeg was stuck in send() with 2.6 MB unsent, and go2rtc had stopped
-    reading its producer (a fan-out wedged on a consumer that went away after a
-    Frigate restart). Killing our processes did not help — go2rtc kept the dead
-    producer listed and never relaunched the exec — only a container restart did.
-    go2rtc 1.9's DELETE/PUT only swap the map entry (no Stop), so the wedged object
-    leaks but every new consumer gets a working stream and a fresh exec."""
+    """Point this camera's go2rtc stream name at a fresh, never-used spare stream
+    object (PATCH alias — see config_store.go2rtc_swap_to_spare). Evidence
+    2026-09-12 10:07: on a stall the main thread was in pipe_write, ffmpeg was
+    stuck in send() with 2.6 MB unsent, and go2rtc had stopped reading its producer
+    (fan-out wedged after a Frigate restart). Killing our processes did not help —
+    go2rtc kept the dead producer listed and never relaunched the exec — only a
+    container restart did. go2rtc's API refuses to create exec sources (PUT ->
+    400), but aliasing to a config-defined spare gives every new consumer a fresh
+    object whose exec launches on demand (verified on an isolated go2rtc 1.9.4)."""
     if not name:
         return
     try:
-        import urllib.parse
-        import urllib.request
         import config_store as cs
-        url = (f"http://127.0.0.1:{cs.G_HTTP}/api/streams?"
-               + urllib.parse.urlencode({"name": name, "src": cs._exec_source(name)}))
-        r = urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=5)
-        log(f"[stall] go2rtc stream '{name}' replaced with a fresh object (HTTP {r.status})")
+        cs.go2rtc_swap_to_spare(name, log=lambda m: log("[stall] " + m))
     except Exception as e:  # noqa: BLE001
-        log(f"[stall] go2rtc stream reset failed: {e}")
+        log(f"[stall] go2rtc spare swap failed: {e}")
 
 
 def _kill_downstream(pids: list) -> None:
