@@ -8,6 +8,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import tutk_client as tc  # noqa: E402  (module-level import loads no TUTK libs)
+import vitals_poller as vp  # noqa: E402
+import config_store as cs  # noqa: E402
+import tempfile  # noqa: E402
 
 
 class RealtimeSentinelTests(unittest.TestCase):
@@ -28,6 +31,33 @@ class RealtimeSentinelTests(unittest.TestCase):
 
     def test_none_is_preserved(self):
         self.assertEqual(tc._gate_realtime(None, None), (None, None))
+
+
+class OverlayTextTests(unittest.TestCase):
+    def _run(self, devices):
+        with tempfile.TemporaryDirectory() as d:
+            saved = cs.VITALS_DIR
+            cs.VITALS_DIR = d
+            try:
+                path = os.path.join(d, "overlay-owlet.txt")
+                with open(path, "w") as f:
+                    f.write("491\u00b0F   255% RH")   # stale text from before the gate
+                vp._write_overlays(devices, lambda m: None)
+                with open(path) as f:
+                    return f.read()
+            finally:
+                cs.VITALS_DIR = saved
+
+    def test_no_readings_blanks_the_hud_instead_of_keeping_stale_text(self):
+        cam = {"kind": "cam", "name": "owlet", "sensors": {"temperature": None, "humidity": None}}
+        self.assertEqual(self._run([cam]), " ")
+
+    def test_readings_are_rendered(self):
+        cam = {"kind": "cam", "name": "owlet", "sensors": {"temperature": 22, "humidity": 45}}
+        out = self._run([cam])
+        self.assertIn("\u00b0F", out)
+        self.assertIn("45% RH", out)
+        self.assertNotIn("491", out)
 
 
 if __name__ == "__main__":
