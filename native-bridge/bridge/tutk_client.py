@@ -575,11 +575,19 @@ TALK_LEGACY = (os.environ.get("OWLET_TALK_LEGACY", "") or "").lower() in (
     "1", "true", "yes", "on")
 try:
     # seconds avServStart2 waits to accept the camera's inbound connection. The app
-    # uses 2; we allow a touch more headroom for slower P2P links (it returns
-    # immediately once the camera connects, so a larger value costs nothing on success).
-    AVSERV_TIMEOUT = int(os.environ.get("OWLET_AVSERV_TIMEOUT") or "4")
+    # uses 2 (avServStart2(session,"","",2,0,chan)); match it.
+    AVSERV_TIMEOUT = int(os.environ.get("OWLET_AVSERV_TIMEOUT") or "2")
 except ValueError:
-    AVSERV_TIMEOUT = 4
+    AVSERV_TIMEOUT = 2
+# Seconds to wait for the camera's SPEAKERSTART ack (0x600b6 = 393398) before
+# opening the AV server. The app awaits this response before serverStart; on a
+# CAM3 (fw 0.4.6.6) skipping the wait makes avServStart2 return -20027
+# (CHANNEL_IN_USED) immediately, even on a freshly restarted session (measured
+# 2026-09-23 with a silent probe). Overridable for other camera models.
+try:
+    AVSERV_ACK_TIMEOUT = float(os.environ.get("OWLET_AVSERV_ACK_TIMEOUT") or "2")
+except ValueError:
+    AVSERV_ACK_TIMEOUT = 2.0
 # Speaker volume IOCTL (IOTYPE_USER_IPCAM_SET_SPK_VOL_REQ = 0x60092 = 393362, from
 # the Owlet app). Payload: 8 bytes, a little-endian int32 "device unit" 0-5 at
 # offset 0. The app maps a 0-100% UI value to units via (pct*5 + 50) // 100.
@@ -796,43 +804,58 @@ def _talk_thread(av: CDLL, iotc: CDLL, session: int, av_idx: int,
             if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
                 return -1, -1
             return av_idx, AV_CHANNEL
-        # AV-server model (matches the app). CRITICAL ORDERING: the camera connects
-        # back to our server channel immediately after it ACKs SPEAKERSTART, so the
-        # server must be LISTENING first. We send SPEAKERSTART and then call
-        # avServStart2 right away (it blocks up to AVSERV_TIMEOUT accepting the
-        # camera's connection). Waiting for the 0x600b6 ack before avServStart2 let
-        # the camera grab the channel first -> avServStart2 returned -20027
-        # (AV_ER_IOTC_CHANNEL_IN_USED). We do NOT wait for the ack.
-        with _AV_IO:
-            chan = iotc.IOTC_Session_Get_Free_Channel(session)
-        if chan < 0:
-            log(f"[talk] IOTC_Session_Get_Free_Channel rc={chan} — no free channel")
-            return -1, -1
-        for attempt in (1, 2):
+        # AV-server model — matches the Owlet app's d1/d.java startSpeaker ->
+        # startAVServer EXACTLY (recovered from the decompiled camera-sdk):
+        #   getFreeChannel -> send SPEAKERSTART(chan) -> WAIT for the camera's
+        #   0x600b6 (393398) ack -> avServStart2(session,"","",2,0,chan).
+        # The ack wait is REQUIRED: on a CAM3 (fw 0.4.6.6) skipping it makes
+        # avServStart2 return -20027 (CHANNEL_IN_USED) immediately on every
+        # attempt, even on a freshly restarted session (measured 2026-09-23 with
+        # a silent probe). An earlier comment here claimed waiting caused -20027
+        # and removed it — that was backwards and left talk-back / sound-to-speaker
+        # completely broken. The audio-recv probe and realtime poller both park on
+        # _TALKING (set by the caller before _open_speaker), so avRecvIOCtrl here
+        # can't have the ack stolen from under it.
+        def _get_free():
+            with _AV_IO:
+                return iotc.IOTC_Session_Get_Free_Channel(session)
+        def _release(ch):
+            # Full release so a failed start can't leak the channel into the next
+            # attempt/clip: SPEAKERSTOP -> avServExit(session, ch) -> Channel_OFF.
+            # (The app's g.a failure path is serverExit -> stop -> channelOff.)
+            _safe(lambda: _ctrl_speaker(av, av_idx, IOTYPE_SPEAKERSTOP, ch))
+            with _AV_IO:
+                if hasattr(av, "avServExit"):
+                    _safe(lambda: av.avServExit(session, ch))
+                _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, ch))
+        # Candidate channels to try, in order: whatever getFreeChannel hands back
+        # first, then a few explicit ones. On this CAM3, avServStart2 on the
+        # getFreeChannel result (1) returns -20027 (CHANNEL_IN_USED) even right
+        # after the SPEAKERSTART ack, so we probe additional channels to find one
+        # the lib will actually let us host a server on. First success wins.
+        free0 = _get_free()
+        candidates = []
+        for c in ([free0] + list(range(1, 9))):
+            if c is not None and c >= 0 and c not in candidates:
+                candidates.append(c)
+        log(f"[talk] speaker channel candidates: {candidates} (getFreeChannel={free0})")
+        for chan in candidates:
             rc = _ctrl_speaker(av, av_idx, IOTYPE_SPEAKERSTART, chan)
-            log(f"[talk] SPEAKERSTART(chan={chan}) rc={rc} (attempt {attempt})")
             if rc in (AV_ER_REMOTE_TIMEOUT_DISCONNECT, AV_ER_SESSION_CLOSE_BY_REMOTE):
-                log("[talk] SPEAKERSTART closed the session — aborting talk")
-                break
-            # start the server NOW (no ack wait) — it accepts the camera's inbound
-            # connection within AVSERV_TIMEOUT seconds.
+                log(f"[talk] SPEAKERSTART(chan={chan}) closed the session — aborting")
+                _release(chan)
+                return -1, -1
+            acked = _await_ioctl_resp(av, av_idx, IOTYPE_SPEAKERSTART_RESP, AVSERV_ACK_TIMEOUT)
             sidx = av.avServStart2(session, b"", b"", AVSERV_TIMEOUT, 0, chan)
-            log(f"[talk] avServStart2(chan={chan}) -> serv_idx={sidx}")
+            log(f"[talk] chan={chan}: SPEAKERSTART rc={rc}, ack={'y' if acked else 'n'}, "
+                f"avServStart2 -> {sidx}")
             if sidx >= 0:
                 spk_chan = chan
                 spk_serv_idx = sidx
                 return sidx, chan
-            if sidx == AV_ER_IOTC_CHANNEL_IN_USED and attempt == 1:
-                # the camera grabbed the channel before our server was up — close
-                # that inbound channel and retry once so the server can own it.
-                log("[talk] channel busy (-20027) — releasing + retrying")
-                with _AV_IO:
-                    _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, chan))
-                time.sleep(0.25)
-                continue
-            break
-        with _AV_IO:
-            _safe(lambda: iotc.IOTC_Session_Channel_OFF(session, chan))
+            _release(chan)
+            time.sleep(0.15)
+        log("[talk] no channel accepted avServStart2 — speaker unavailable")
         return -1, -1
 
     def _close_speaker():

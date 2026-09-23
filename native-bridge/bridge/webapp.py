@@ -1115,10 +1115,21 @@ def lullaby_tracks(camera):
     self-reports these — no cloud needed."""
     if not _known_camera(camera):
         return jsonify({"ok": False, "error": "no such camera"}), 404
-    ok, resp = _lullaby_rpc(camera, {"action": "sources"}, want_resp=True)
+    # The camera's audio_player_sources reply is intermittent — the JSON can
+    # arrive in fragments and the first query after connect often comes back with
+    # an empty items list. Retry a few times until the camera returns its tracks
+    # so the app's sound machine isn't randomly empty.
+    ok, resp, items = False, {}, []
+    for _ in range(5):
+        ok, resp = _lullaby_rpc(camera, {"action": "sources"}, want_resp=True)
+        if ok:
+            items = resp.get("items") or []
+            if items:
+                break
+        time.sleep(0.4)
     if not ok:
         return jsonify({"ok": False, **resp}), 502
-    return jsonify({"ok": True, "items": resp.get("items") or [], "raw": resp})
+    return jsonify({"ok": True, "items": items, "raw": resp})
 
 
 @app.get("/api/lullaby/<camera>/state")
