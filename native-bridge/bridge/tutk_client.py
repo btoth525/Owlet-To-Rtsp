@@ -433,32 +433,58 @@ def _handle_audio_cmd(av, av_idx, req: dict) -> dict:
         pct = max(0, min(100, (units * 100 + 2) // 5))   # app's i1.i.b()
         return {"ok": True, "units": units, "percent": pct}
     # --- native audio player -------------------------------------------------
+    wire = _player_wire(action, req)
+    if wire is None:
+        return {"error": f"unknown action {action!r}"}
+    if action in ("sources", "state"):
+        return _json_ioctl(av, av_idx, wire[0])
+    for body in wire:
+        _json_ioctl(av, av_idx, body, want_resp=False)
+    return {"ok": True, "action": action}
+
+
+def _player_wire(action: str, req: dict):
+    """The exact JSON bodies the Owlet app sends for a native-player action, in
+    send order; None for an unknown action.
+
+    Envelope, from the app's camera-sdk (kotlinx.serialization with
+    `classDiscriminator = "cmd"` over the sealed class TutkJsonCommand): every
+    message is FLAT -- `{"cmd": "<name>", ...fields...}`. The first cut of this
+    code sent `{"<name>": {...}}` instead, which the camera rejects with
+    `{"cmd":"unknown","error_code":5,"reason":"Invalid cmd field"}` (seen live
+    on a CAM3 / fw 0.4.6.6, 2026-09-23). Per-command fields, from the DTOs:
+
+      audio_player_sources / _state / _reset : no fields (object serializers)
+      audio_player_queue     {"queue": {"items": [{"uuid": ...}, ...]}}
+      audio_player_set       {"player": {"queue": {"repeat": bool, "timeout_ms": int}}}
+      audio_player_transport {"player": {"action": "play|pause|stop|next|prev"}}
+
+    Replies are flat too: {"cmd", "result", "error_code"} plus "items" (sources)
+    or "player" (state)."""
+    def cmd(name, **fields):
+        return {"cmd": name, **fields}
     if action == "sources":
-        return _json_ioctl(av, av_idx, {"audio_player_sources": {}})
+        return [cmd("audio_player_sources")]
     if action == "state":
-        return _json_ioctl(av, av_idx, {"audio_player_state": {}})
+        return [cmd("audio_player_state")]
     if action == "reset":
-        return _json_ioctl(av, av_idx, {"audio_player_reset": {}}, want_resp=False)
+        return [cmd("audio_player_reset")]
     if action in ("play", "pause", "stop", "next", "prev"):
+        out = []
         uuids = req.get("uuids") or []
         if uuids:
-            items = [{"uuid": u} for u in uuids]
-            _json_ioctl(av, av_idx,
-                        {"audio_player_queue": {"queue": {"items": items}}},
-                        want_resp=False)
+            out.append(cmd("audio_player_queue",
+                           queue={"items": [{"uuid": u} for u in uuids]}))
         if req.get("repeat") is not None or req.get("timeout_ms") is not None:
             q = {}
             if req.get("repeat") is not None:
                 q["repeat"] = bool(req["repeat"])
             if req.get("timeout_ms") is not None:
                 q["timeout_ms"] = int(req["timeout_ms"])
-            _json_ioctl(av, av_idx, {"audio_player_set": {"player": {"queue": q}}},
-                        want_resp=False)
-        _json_ioctl(av, av_idx,
-                    {"audio_player_transport": {"player": {"action": action}}},
-                    want_resp=False)
-        return {"ok": True, "action": action}
-    return {"error": f"unknown action {action!r}"}
+            out.append(cmd("audio_player_set", player={"queue": q}))
+        out.append(cmd("audio_player_transport", player={"action": action}))
+        return out
+    return None
 
 
 def _audioplayer_thread(av, av_idx, stop_evt):
