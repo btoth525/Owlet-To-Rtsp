@@ -622,6 +622,20 @@ def talk_fifo_path(name: str) -> str:
     return os.path.join(tmp, "owlet-talk-" + name)
 
 
+def stream_ready(name: str) -> bool:
+    """Is this camera's tutk_client session up? The generated exec creates the
+    talk FIFO (rm + mkfifo) *before* it starts tutk_client and removes it in its
+    EXIT trap, so the FIFO's existence tracks the session exactly. This is the
+    signal every control-plane endpoint should gate on.
+
+    It must NOT be the audiocmd/audioresp files: the exec `rm -f`s those at
+    every start and nothing recreates them until the first request is written,
+    so gating on their existence made the native sound machine, device info,
+    LED and live-volume endpoints answer "camera isn't streaming yet" forever
+    while the camera was plainly streaming (found 2026-09-23)."""
+    return os.path.exists(talk_fifo_path(name))
+
+
 def audio_fifo_path(name: str) -> str:
     """The FIFO tutk_client writes the camera's received ADTS AAC into, and the
     audio producer reads from — same path the generated exec creates

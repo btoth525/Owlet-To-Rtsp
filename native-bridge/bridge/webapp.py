@@ -862,7 +862,7 @@ def _ffmpeg_to_speaker(camera: str, input_args: list):
     rate) — set to match the camera's probed speaker rate if no audio plays."""
     fifo = cs.talk_fifo_path(camera)
     log(f"[talk] FIFO={fifo} exists={os.path.exists(fifo)}")
-    if not os.path.exists(fifo):
+    if not cs.stream_ready(camera):
         return False, "camera isn't streaming yet — start its stream first", None
     # Quick check: can we open the FIFO for writing without blocking?
     # If tutk_client's _talk_thread is NOT running (or FIFO has no reader),
@@ -1081,7 +1081,9 @@ def _lullaby_rpc(camera: str, req: dict, want_resp: bool, timeout: float = 4.0):
     import json as _json
     cmd_path = cs.audiocmd_file_path(camera)
     resp_path = cs.audioresp_file_path(camera)
-    if not os.path.exists(cmd_path):
+    # Gate on the session, not on cmd_path: the exec deletes cmd_path at every
+    # start and it only comes into being when we write the first request below.
+    if not cs.stream_ready(camera):
         return False, {"error": "camera isn't streaming yet — start its stream first"}
     with _LULLABY_LOCK:
         _LULLABY_SEQ[0] += 1
