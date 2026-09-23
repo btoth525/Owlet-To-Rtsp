@@ -143,6 +143,29 @@ class AudioProducerTests(unittest.TestCase):
         self.assertIn(base, self._stream("owlet")[1])
 
 
+class StreamReadyTests(unittest.TestCase):
+    """Control-plane endpoints (sound machine, device info, LED, live volume)
+    must gate on the talk FIFO, which the exec creates before tutk_client and
+    removes on exit -- not on the audiocmd file, which the exec deletes at every
+    start and which only exists after the first request is written."""
+
+    def test_ready_iff_talk_fifo_exists(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            saved = os.environ.get("TMPDIR")
+            os.environ["TMPDIR"] = d
+            try:
+                self.assertFalse(cs.stream_ready("owlet"))
+                os.mkfifo(cs.talk_fifo_path("owlet"))
+                self.assertTrue(cs.stream_ready("owlet"))
+                # the audiocmd file being absent must not matter
+                self.assertFalse(os.path.exists(cs.audiocmd_file_path("owlet")))
+                self.assertTrue(cs.stream_ready("owlet"))
+            finally:
+                if saved is None: os.environ.pop("TMPDIR", None)
+                else: os.environ["TMPDIR"] = saved
+
+
 class KeepaliveArgvTests(unittest.TestCase):
     def test_no_rw_timeout_and_noninteractive(self):
         """This build's ffmpeg rejects -rw_timeout on RTSP ("Option not found",
