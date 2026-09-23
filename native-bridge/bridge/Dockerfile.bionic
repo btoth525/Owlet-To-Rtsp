@@ -4,15 +4,19 @@
 # UI, same KMS auto-fetch, same tutk_client — only the runtime changes.
 
 # go2rtc is a static Go binary (no libc dependency) — grab it in a tiny stage.
+ARG TARGETARCH=amd64
 FROM debian:stable-slim AS dl
+ARG TARGETARCH
 ARG GO2RTC_VERSION=1.9.4
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates fonts-dejavu-core \
  && curl -fsSL -o /go2rtc \
-      "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64" \
+      "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_${TARGETARCH}" \
  && chmod +x /go2rtc \
  && cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /DejaVuSans.ttf
 
-FROM termux/termux-docker:x86_64
+ARG TARGETARCH=amd64
+ARG TERMUX_TAG=x86_64
+FROM termux/termux-docker:${TERMUX_TAG}
 
 # 1) Run Termux's bootstrap second stage (the entrypoint does this at container
 #    start; we need it now so the package manager works during the build).
@@ -48,8 +52,10 @@ RUN mkdir -p /bin \
  && ln -sf /data/data/com.termux/files/usr/bin/sh /bin/sh \
  && ln -sf /data/data/com.termux/files/usr/bin/bash /bin/bash
 
-ENV TUTK_LIB_DIR=/app/libs/x86_64 \
-    LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib \
+ARG TUTK_ARCH=x86_64
+ENV TUTK_ARCH=${TUTK_ARCH} \
+    TUTK_LIB_DIR=/app/libs/${TUTK_ARCH} \
+    LD_LIBRARY_PATH=/app/libs/${TUTK_ARCH}:/data/data/com.termux/files/usr/lib \
     PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin \
     CONFIG_PATH=/config/owlet.yaml \
     ENV_PATH=/config/owlet.env

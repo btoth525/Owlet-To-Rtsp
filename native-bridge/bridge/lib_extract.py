@@ -18,7 +18,7 @@ import io
 import os
 import zipfile
 
-ARCH = "x86_64"
+ARCH = os.environ.get("TUTK_ARCH", "x86_64")   # x86_64 | arm64-v8a
 TUTK_LIBS = [
     "libIOTCAPIs.so",
     "libAVAPIs.so",
@@ -62,7 +62,7 @@ def _libs_from_archive(path: str) -> dict[str, bytes]:
             return libs
         # bundle of split APKs — open the inner apks, prefer an x86_64 split
         inner = [n for n in z.namelist() if n.lower().endswith(".apk")]
-        inner.sort(key=lambda n: (0 if "x86_64" in n.lower() else 1, n))
+        inner.sort(key=lambda n: (0 if ARCH.lower() in n.lower() else 1, n))
         for n in inner:
             try:
                 with zipfile.ZipFile(io.BytesIO(z.read(n))) as iz:
