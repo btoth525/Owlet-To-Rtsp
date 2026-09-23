@@ -379,9 +379,26 @@ def _audio_source(name: str) -> str:
 
     The camera sends AAC-LC 8 kHz mono in ADTS frames (codec_id 0x0088,
     768-byte frames every 128 ms), which `_audio_probe` writes whole into the
-    FIFO. So this is a plain `-f aac` (ADTS demuxer) read and `-c:a copy` — no
-    transcode, no CPU. Consumers that need Opus (WebRTC) get it from the
-    downstream go2rtc/Frigate `#audio=opus` variant, matching every other camera.
+    FIFO, so the input side is a plain `-f aac` (ADTS demuxer) read.
+
+    The output is transcoded to Opus, NOT copied, and that is not optional:
+    ffmpeg's RTSP muxer refuses AAC that arrived as ADTS --
+
+        [rtsp] AAC with no global headers is currently not supported.
+        Could not write header (incorrect codec parameters ?)
+
+    ADTS carries its config per frame instead of as global extradata, and the
+    muxer needs that extradata at write_header time. `-bsf:a aac_adtstoasc`
+    cannot rescue it either: the filter only derives extradata once the first
+    packet flows, which is after the header is due. Copying ADTS is what made
+    the first cut of this producer die on launch (the FIFO opened and closed
+    three times, and the stream stayed video-only).
+
+    Opus is also what the consumer actually wants: WebRTC cannot carry AAC at
+    all, so something has to produce Opus somewhere. Doing it here costs
+    ~nothing (8 kHz mono, resampled to Opus' required 48 kHz) and means Frigate
+    needs no ffmpeg wrapper for this camera. Frigate's recorder already runs
+    `-c:a aac`, so mp4 recordings still get AAC.
 
     Lifecycle notes:
       * The FIFO is created by the video exec. We wait for it to appear rather
@@ -419,7 +436,9 @@ def _audio_source(name: str) -> str:
         '[ -p "$A" ] || { echo "audio %(n)s - FIFO never appeared" >&2; exit 1; }; '
         'exec ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -f aac -i "$A" '
-        '-c:a copy -f rtsp -rtsp_transport tcp {output}'
+        # lowdelay + 48k mono: Opus' RTP clock rate is always 48 kHz.
+        '-c:a libopus -b:a 24k -ar 48000 -ac 1 -application lowdelay '
+        '-f rtsp -rtsp_transport tcp {output}'
     ) % {"n": name}
     return "exec:bash -c '" + cmd + "'"
 
