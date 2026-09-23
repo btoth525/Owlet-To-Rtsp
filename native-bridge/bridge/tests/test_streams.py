@@ -118,8 +118,22 @@ class AudioProducerTests(unittest.TestCase):
             self.assertEqual(len(s), 2, f"spare{i} is not a full replacement")
             self.assertIn("-f aac -i", s[1])
 
-    def test_overlay_stream_untouched(self):
+    def test_overlay_stream_is_single_source(self):
         self.assertEqual(len(self._stream("owlet_overlay")), 1)
+
+    def test_overlay_filter_is_quoted_and_expansion_free(self):
+        """`x=(w-tw)/2` has parentheses, which bash treats as metacharacters:
+        unquoted, `bash -c` failed with "syntax error near unexpected token `('"
+        and the overlay never started (every DESCRIBE was a 404). The HUD text
+        also contains "% RH", which drawtext otherwise parses as an expansion."""
+        ov = self._stream("owlet_overlay")[0]
+        self.assertIn('-filter:v "drawtext=', ov)
+        self.assertIn(':expansion=none', ov)
+        # no parenthesis may sit outside the double-quoted filter argument
+        quoted = ov.split('-filter:v "', 1)[1].split('" ', 1)[0]
+        outside = ov.replace(quoted, "")
+        self.assertNotIn("(", outside)
+        self.assertNotIn(")", outside)
 
     def test_audio_fifo_path_matches_the_generated_exec(self):
         """webapp/tutk helpers and the generated bash must agree on the path."""
@@ -127,6 +141,22 @@ class AudioProducerTests(unittest.TestCase):
         self.assertEqual(base, "owlet-audio-owlet")
         self.assertIn(base, self._stream("owlet")[0])
         self.assertIn(base, self._stream("owlet")[1])
+
+
+class KeepaliveArgvTests(unittest.TestCase):
+    def test_no_rw_timeout_and_noninteractive(self):
+        """This build's ffmpeg rejects -rw_timeout on RTSP ("Option not found",
+        exit 8) and prompts to overwrite /dev/null without -y/-nostdin. Either one
+        silently kills the warm viewer (its stderr is DEVNULL)."""
+        import keepalive
+        argv = keepalive._argv("owlet")
+        self.assertNotIn("-rw_timeout", argv)
+        self.assertIn("-timeout", argv)
+        self.assertIn("-nostdin", argv)
+        self.assertIn("-y", argv)
+        self.assertEqual(argv[-3:], ["-f", "mpegts", "/dev/null"])
+        self.assertIn("rtsp://127.0.0.1:8554/owlet", argv)
+
 
 
 if __name__ == "__main__":
