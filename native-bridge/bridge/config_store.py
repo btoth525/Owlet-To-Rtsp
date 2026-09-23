@@ -296,14 +296,32 @@ def _write_env(path: str, env: dict[str, str]) -> None:
 
 
 def _exec_source(name: str) -> str:
-    """go2rtc `exec:` source for one camera: source its env, set up the talk FIFO,
-    run tutk_client (H.264 -> stdout) piped to ffmpeg, repackaged to RTSP.
+    """go2rtc `exec:` source for one camera: source its env, set up the talk +
+    audio FIFOs, run tutk_client (H.264 -> stdout) piped to ffmpeg, repackaged
+    to RTSP.
 
-    VIDEO-ONLY — identical pipeline to the proven :latest build. The audio FIFO
-    (receive-from-camera) is intentionally omitted: opening a named-pipe as a
-    second ffmpeg input blocks ffmpeg until a writer appears, which delays (or
-    prevents) the RTSP stream from starting and causes consumers to receive
-    "Invalid data found when processing input".
+    THE VIDEO PIPELINE IS UNCHANGED from the proven :latest build: still one
+    ffmpeg with a single H.264 stdin input and `-c:v copy`. Camera audio is NOT
+    muxed here. It used to be attempted as a second `-i <fifo>` on this ffmpeg,
+    which is what the old "VIDEO-ONLY, audio intentionally omitted" note was
+    about, and there are two independent reasons never to go back to that:
+
+      * a named-pipe input blocks ffmpeg until a writer appears, delaying (or
+        preventing) the RTSP publish, so consumers get "Invalid data found
+        when processing input" — i.e. no picture; and
+      * `_audio_probe` STOPS writing while talk-back is active (half-duplex is
+        mandatory: simultaneous TUTK send+recv wedges the camera's single AV
+        session). A starved audio input in the same mux makes ffmpeg hold video
+        back on DTS interleave, so every press of "Talk" would hitch the
+        picture.
+
+    Instead the audio rides its own producer (`_audio_source`) which go2rtc
+    merges into the same stream. If audio never starts, starves, or dies, the
+    video producer neither knows nor cares — go2rtc just serves video.
+
+    This function's only audio-related job is to hand tutk_client the FIFO to
+    write into (OWLET_AUDIO_FIFO) and to own that FIFO's lifecycle, exactly as
+    it already does for the talk FIFO.
 
     OWLET_TALK_FIFO is still set up so the web-panel "Talk" / lullaby buttons
     work (webapp writes PCM → FIFO → tutk_client sends to camera).
@@ -319,19 +337,90 @@ def _exec_source(name: str) -> str:
         'set -a; [ -f %(e)s ] && . %(e)s; '
         'D="${TMPDIR:-/tmp}"; mkdir -p "$D" 2>/dev/null; '
         'T="$D/owlet-talk-%(n)s"; rm -f "$T"; mkfifo "$T" 2>/dev/null; '
+        # Audio FIFO: tutk_client writes the camera's ADTS AAC frames here and
+        # the _audio_source producer reads them. Created before python starts so
+        # the audio producer finds it immediately.
+        #
+        # Deliberately UNLIKE the talk FIFO: created only if absent, and never
+        # removed (not here, not in the trap). The audio reader can be parked in
+        # open() waiting for the first frame, and rm+mkfifo would swap the inode
+        # underneath it -- leaving that ffmpeg blocked forever on an unlinked
+        # pipe while tutk_client writes to a new one nobody reads, i.e. audio
+        # silently dead until the container restarts. A stable path keeps every
+        # relaunch pointing at the same pipe. Leftover bytes are not a hazard:
+        # the probe only ever writes whole ADTS frames and the demuxer resyncs
+        # on the 0xFFFx sync word.
+        'A="$D/owlet-audio-%(n)s"; [ -p "$A" ] || mkfifo "$A" 2>/dev/null; '
         'V="$D/owlet-vol-%(n)s"; '
         '[ -n "$OWLET_SPK_VOL" ] && printf "%%s" "$OWLET_SPK_VOL" > "$V"; '
         'C="$D/owlet-audiocmd-%(n)s"; R="$D/owlet-audioresp-%(n)s"; rm -f "$C" "$R"; '
         'mkdir -p /config/vitals 2>/dev/null; '
-        'export OWLET_TALK_FIFO="$T" OWLET_VOL_FILE="$V" '
+        'export OWLET_TALK_FIFO="$T" OWLET_AUDIO_FIFO="$A" OWLET_VOL_FILE="$V" '
         'OWLET_AUDIOCMD_FILE="$C" OWLET_AUDIORESP_FILE="$R" '
         'OWLET_CAM_SENSORS="/config/vitals/cam-%(n)s.json"; '
+        # $A (audio FIFO) is intentionally NOT cleaned up here -- see above.
         'trap "rm -f $T $V $C $R" EXIT; '
         'python3 /app/tutk_client.py 2>>%(l)s | '
         'ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -analyzeduration 5000000 -probesize 5000000 -f h264 -i - '
         '-c:v copy -f rtsp -rtsp_transport tcp {output}'
     ) % {"e": envf, "l": logf, "n": slugify(name)}
+    return "exec:bash -c '" + cmd + "'"
+
+
+def _audio_source(name: str) -> str:
+    """A SECOND go2rtc producer for the same stream, carrying ONLY the camera's
+    audio. go2rtc merges the tracks of every source listed under a stream, so
+    `owlet: [_exec_source, _audio_source]` serves one H.264 + one AAC track.
+
+    Why a separate producer instead of a second input on the video ffmpeg: see
+    _exec_source. In short, this shape makes audio failure structurally unable
+    to touch the picture.
+
+    The camera sends AAC-LC 8 kHz mono in ADTS frames (codec_id 0x0088,
+    768-byte frames every 128 ms), which `_audio_probe` writes whole into the
+    FIFO. So this is a plain `-f aac` (ADTS demuxer) read and `-c:a copy` — no
+    transcode, no CPU. Consumers that need Opus (WebRTC) get it from the
+    downstream go2rtc/Frigate `#audio=opus` variant, matching every other camera.
+
+    Lifecycle notes:
+      * The FIFO is created by the video exec. We wait for it to appear rather
+        than creating it, so there is exactly one owner and no rm/mkfifo race
+        that could leave this reader holding a stale inode. The wait is capped
+        well inside go2rtc's launch window; the gap is normally milliseconds,
+        since mkfifo runs before tutk_client starts.
+      * `-i "$A"` blocks in open() until tutk_client writes its first frame,
+        which happens moments after the video's first frame (AUDIOSTART is sent
+        right after IOTYPE_START), so both producers publish at about the same
+        time. A blocked reader still counts as a reader, so tutk_client's
+        non-blocking O_WRONLY open succeeds and neither side deadlocks.
+      * When the video exec is relaunched it rm's the FIFO, this ffmpeg sees
+        EOF and exits, and go2rtc restarts it against the fresh pipe.
+      * Wallclock timestamps, same as the video input, so the two producers
+        share one arrival-stamped clock and stay in sync."""
+    name = slugify(name)   # defense in depth: never interpolate a raw name into bash
+    cmd = (
+        'D="${TMPDIR:-/tmp}"; A="$D/owlet-audio-%(n)s"; '
+        # Wait (up to ~10s) for the video exec's mkfifo. Deliberately no counter
+        # variable and no arithmetic: go2rtc expands ${...} when it loads the
+        # config (that is how D= resolves to the Termux tmpdir) while leaving bare
+        # $VAR alone, so a $i / $((i+1)) here would be substituted away and break
+        # the loop. A literal word list is substitution-proof.
+        'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; '
+        'do [ -p "$A" ] && break; sleep 0.5; done; '
+        # Still no FIFO means the video exec isn't up. Exit non-zero and let
+        # go2rtc retry rather than sitting here holding a producer slot open.
+        #
+        # NB: no ": " (colon-space) anywhere in this command. These sources are
+        # emitted as UNQUOTED YAML scalars, so a colon-space makes the YAML
+        # parser read the line as a MAPPING instead of a string -- which breaks
+        # the stream, and can take neighbouring config with it. Caught in review
+        # when the round-trip assertion below started parsing this as a dict.
+        '[ -p "$A" ] || { echo "audio %(n)s - FIFO never appeared" >&2; exit 1; }; '
+        'exec ffmpeg -hide_banner -loglevel warning -fflags +genpts '
+        '-use_wallclock_as_timestamps 1 -f aac -i "$A" '
+        '-c:a copy -f rtsp -rtsp_transport tcp {output}'
+    ) % {"n": name}
     return "exec:bash -c '" + cmd + "'"
 
 
@@ -386,12 +475,17 @@ def render_go2rtc(cameras: list[dict], candidate: str | None = None) -> str:
         nm = slugify(cam.get("name") or "")  # never interpolate a raw name
         lines.append(f"  {nm}:")
         lines.append("    - " + _exec_source(nm))
+        # Second producer = camera audio only; go2rtc merges it into this stream.
+        # Listed after the video source so video is the stream's first track.
+        lines.append("    - " + _audio_source(nm))
         # Never-started identical spares: on a go2rtc fan-out wedge the watchdog /
         # stall supervisor alias the camera name to one of these (see
-        # go2rtc_swap_to_spare). Cost nothing until used.
+        # go2rtc_swap_to_spare). Cost nothing until used. Spares must be full
+        # replacements, audio included, or a swap would silently drop sound.
         for sp in spare_names(nm):
             lines.append(f"  {sp}:")
             lines.append("    - " + _exec_source(nm))
+            lines.append("    - " + _audio_source(nm))
         # Optional glass-HUD variant, on-demand (free unless viewed).
         lines.append(f"  {nm}_overlay:")
         lines.append("    - " + _overlay_source(nm))
@@ -499,6 +593,14 @@ def talk_fifo_path(name: str) -> str:
     exec creates (${TMPDIR:-/tmp}/owlet-talk-<name>)."""
     tmp = os.environ.get("TMPDIR") or "/tmp"
     return os.path.join(tmp, "owlet-talk-" + name)
+
+
+def audio_fifo_path(name: str) -> str:
+    """The FIFO tutk_client writes the camera's received ADTS AAC into, and the
+    audio producer reads from — same path the generated exec creates
+    (${TMPDIR:-/tmp}/owlet-audio-<name>)."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "owlet-audio-" + name)
 
 
 def vol_file_path(name: str) -> str:
