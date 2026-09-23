@@ -179,6 +179,26 @@ except ValueError:
     TEMP_SCALE = 1.0
 
 
+def _gate_realtime(temp, humidity):
+    """Drop the camera's not-available sentinels from a GET_REALTIME_DATA reply.
+
+    A cam without (or not yet reporting) the room sensors answers 0xFF (255) in
+    both the temperature and humidity fields. Published raw, that became a
+    255 °C room -> "491°F   255% RH" on the HUD and in the MQTT/Home Assistant
+    entities (seen live 2026-09-23). Same sanity window the frame-info path
+    already applies for temperature (the app's isValidCelsiusTemperature), and
+    0..100 for humidity. Returns (temp, humidity) with junk replaced by None."""
+    t = temp
+    if t is not None:
+        scaled = t / TEMP_SCALE if TEMP_SCALE else t
+        if not (-20 <= scaled <= 60):
+            t = None
+    h = humidity
+    if h is not None and not (0 <= h <= 100):
+        h = None
+    return t, h
+
+
 def _publish_cam_sensors(**fields) -> None:
     """Merge new readings into the sidecar JSON (atomic write)."""
     if not (CAM_SENSORS_PATH and SENSORS_ENABLED):
@@ -256,9 +276,12 @@ def _realtime_thread(av, av_idx, stop_evt):
                     break
                 if io_type.value == IOTYPE_GET_REALTIME_RESP and rc >= 16:
                     b = rbuf.raw
+                    temp, hum = _gate_realtime(
+                        int.from_bytes(b[0:4], "little", signed=True),
+                        int.from_bytes(b[4:8], "little", signed=True))
                     _publish_cam_sensors(
-                        temperature=int.from_bytes(b[0:4], "little", signed=True),
-                        humidity=int.from_bytes(b[4:8], "little", signed=True),
+                        temperature=temp,
+                        humidity=hum,
                         noise=int.from_bytes(b[8:12], "little", signed=True),
                         brightness=int.from_bytes(b[12:16], "little", signed=True),
                         # wifi_rssi is a 4-byte LE int at offset 16 (confirmed

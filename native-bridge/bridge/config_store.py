@@ -459,9 +459,17 @@ def _overlay_source(name: str) -> str:
         'VENC="-c:v h264_nvenc -preset p2 -tune ll -g 60"; '
         'exec ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay '
         '-rtsp_transport tcp -i %(src)s '
-        '-filter:v drawtext=fontfile=/app/fonts/DejaVuSans.ttf:textfile=$OV:reload=1'
+        # The filter MUST be double-quoted: `x=(w-tw)/2` contains parentheses,
+        # which are bash metacharacters. Unquoted, `bash -c` refused the whole
+        # command with "syntax error near unexpected token `('", so this stream
+        # never started (go2rtc answered every DESCRIBE with 404). Caught on
+        # 2026-09-23 from go2rtc's /api/log. `expansion=none` stops drawtext
+        # treating the HUD's "% RH" as a %-expansion ("Stray %" warning per
+        # frame); the text never uses %{...} functions.
+        '-filter:v "drawtext=fontfile=/app/fonts/DejaVuSans.ttf:textfile=$OV:reload=1'
+        ':expansion=none'
         ':fontcolor=white:fontsize=h/26:line_spacing=6:box=1:boxcolor=black@0.40:boxborderw=18'
-        ':shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-tw)/2:y=h-th-(h/16) '
+        ':shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-tw)/2:y=h-th-(h/16)" '
         '$VENC -c:a copy -muxdelay 0 -muxpreload 0 -f rtsp -rtsp_transport tcp {output}'
     ) % {"n": name, "src": src}
     return "exec:bash -c '" + cmd + "'"

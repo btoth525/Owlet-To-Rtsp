@@ -21,16 +21,29 @@ import time
 import config_store as cs
 
 
-def _spawn(name: str) -> subprocess.Popen:
+def _argv(name: str) -> list[str]:
+    """The warm-viewer command. Two things here are load-bearing on the
+    container's ffmpeg (8.1.x, Termux build) and were found dead on 2026-09-23:
+
+      * NO `-rw_timeout`. That is an AVIO/protocol option; this build's RTSP
+        demuxer doesn't consume it, so ffmpeg exits 8 with "Option rw_timeout
+        not found" before ever connecting. `-timeout` is the RTSP demuxer's own
+        socket I/O timeout and is the one that actually fires on a starved
+        interleaved-TCP session.
+      * `-nostdin -y`. Without them ffmpeg asks "File '/dev/null' already
+        exists. Overwrite? [y/N]", reads EOF from the container's closed stdin,
+        and exits "Not overwriting". Both failures were silent because stderr
+        goes to DEVNULL, so the keepalive just crash-looped in backoff forever.
+    """
     url = f"rtsp://127.0.0.1:{cs.G_RTSP}/{name}"
-    return subprocess.Popen(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
-         "-rw_timeout", "15000000",   # bail if the stream stalls (don't hang the warm viewer)
-         "-timeout", "15000000",      # rtsp socket I/O timeout: rw_timeout alone did not fire on a
-                                      # starved interleaved-TCP session (viewer sat 4+ min with no data)
-         "-i", url, "-c", "copy", "-f", "mpegts", "/dev/null"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-rtsp_transport", "tcp",
+            "-timeout", "15000000",      # rtsp socket I/O timeout (see above)
+            "-i", url, "-c", "copy", "-f", "mpegts", "/dev/null"]
+
+
+def _spawn(name: str) -> subprocess.Popen:
+    return subprocess.Popen(_argv(name), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def main() -> None:
