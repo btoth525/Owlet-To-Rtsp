@@ -1,0 +1,121 @@
+"""Unit tests for the generated go2rtc stream config (no camera, no container).
+
+These guard the camera-audio producer added alongside the video exec, and the
+YAML-safety invariant that bit during its review.
+
+Run:  python3 -m unittest discover -s native-bridge/bridge/tests -v
+"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import config_store as cs  # noqa: E402
+
+
+def sources(text):
+    """Every `    - <source>` line of a rendered config."""
+    return [ln.strip()[2:] for ln in text.splitlines() if ln.startswith("    - ")]
+
+
+class YamlSafetyTests(unittest.TestCase):
+    """The generated sources are emitted as UNQUOTED YAML scalars. A ": "
+    (colon-space) in one makes a YAML parser read the line as a mapping rather
+    than a string, which breaks that stream and can corrupt neighbouring config.
+    Checked as a plain string invariant so the suite stays stdlib-only."""
+
+    def test_no_colon_space_in_any_generated_source(self):
+        text = cs.render_go2rtc([{"name": "owlet"}, {"name": "nursery"}])
+        for src in sources(text):
+            self.assertNotIn(": ", src, f"colon-space would become a YAML map: {src}")
+
+    def test_no_colon_space_in_each_builder(self):
+        for build in (cs._exec_source, cs._audio_source, cs._overlay_source):
+            with self.subTest(builder=build.__name__):
+                self.assertNotIn(": ", build("owlet"))
+
+
+class AudioProducerTests(unittest.TestCase):
+    def setUp(self):
+        self.text = cs.render_go2rtc([{"name": "owlet"}])
+
+    def _stream(self, name):
+        """The source lines belonging to one stream key."""
+        out, cur = [], None
+        for ln in self.text.splitlines():
+            if ln.startswith("  ") and ln.rstrip().endswith(":") and not ln.startswith("    "):
+                cur = ln.strip().rstrip(":")
+            elif ln.startswith("    - ") and cur == name:
+                out.append(ln.strip()[2:])
+        return out
+
+    def test_camera_has_video_then_audio(self):
+        s = self._stream("owlet")
+        self.assertEqual(len(s), 2)
+        # order matters: video first so it is the stream's first track
+        self.assertIn("-f h264 -i -", s[0])
+        self.assertIn("tutk_client", s[0])
+        self.assertIn("-f aac -i", s[1])
+        self.assertNotIn("tutk_client", s[1])
+
+    def test_video_exec_still_muxes_video_only(self):
+        """The whole point of the split: audio failure cannot reach the picture,
+        and talk-back parking the audio probe cannot stall the video mux."""
+        video = self._stream("owlet")[0]
+        self.assertIn("-c:v copy", video)
+        self.assertNotIn("-f aac", video)
+        self.assertNotIn("-c:a", video)
+
+    def test_video_exec_hands_off_the_audio_fifo(self):
+        video = self._stream("owlet")[0]
+        self.assertIn('OWLET_AUDIO_FIFO="$A"', video)
+        self.assertIn('A="$D/owlet-audio-owlet"', video)
+
+    def test_audio_fifo_inode_is_stable_across_relaunches(self):
+        """The audio reader can be parked in open() waiting for the first frame.
+        rm+mkfifo would swap the inode underneath it, leaving that ffmpeg blocked
+        on an unlinked pipe forever while tutk_client writes to a new one nobody
+        reads -- audio dead until the container restarts. So the audio FIFO is
+        create-if-absent and is never removed, unlike the talk FIFO."""
+        video = self._stream("owlet")[0]
+        self.assertIn('[ -p "$A" ] || mkfifo "$A"', video)
+        self.assertNotIn('rm -f "$A"', video)
+        trap = video.split("trap ")[1].split("EXIT")[0]
+        self.assertNotIn("$A", trap)
+        self.assertIn("$T", trap)     # talk FIFO still is cleaned up
+
+    def test_audio_producer_waits_without_shell_arithmetic(self):
+        """go2rtc expands ${...} when it loads the config but leaves bare $VAR
+        alone, so a $i counter would be substituted away and break the loop."""
+        audio = self._stream("owlet")[1]
+        self.assertNotIn("$((", audio)
+        self.assertNotIn("$i", audio)
+        self.assertIn("for _ in 1 2 3", audio)
+
+    def test_only_tmpdir_is_brace_expanded(self):
+        import re
+        for src in sources(self.text):
+            for m in re.findall(r"\$\{[^}]*\}", src):
+                self.assertIn("TMPDIR", m, f"unintended go2rtc expansion: {m}")
+
+    def test_every_spare_carries_audio_too(self):
+        """A self-heal alias swap points the camera name at a spare; a spare
+        without the audio producer would silently drop sound."""
+        for i in range(1, cs.SPARE_STREAMS + 1):
+            s = self._stream(f"owlet_spare{i}")
+            self.assertEqual(len(s), 2, f"spare{i} is not a full replacement")
+            self.assertIn("-f aac -i", s[1])
+
+    def test_overlay_stream_untouched(self):
+        self.assertEqual(len(self._stream("owlet_overlay")), 1)
+
+    def test_audio_fifo_path_matches_the_generated_exec(self):
+        """webapp/tutk helpers and the generated bash must agree on the path."""
+        base = os.path.basename(cs.audio_fifo_path("owlet"))
+        self.assertEqual(base, "owlet-audio-owlet")
+        self.assertIn(base, self._stream("owlet")[0])
+        self.assertIn(base, self._stream("owlet")[1])
+
+
+if __name__ == "__main__":
+    unittest.main()
