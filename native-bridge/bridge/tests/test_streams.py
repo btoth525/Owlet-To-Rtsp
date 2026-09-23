@@ -84,6 +84,18 @@ class AudioProducerTests(unittest.TestCase):
         self.assertNotIn("$A", trap)
         self.assertIn("$T", trap)     # talk FIFO still is cleaned up
 
+    def test_audio_producer_emits_opus_not_copied_aac(self):
+        """ffmpeg's RTSP muxer refuses AAC that arrived as ADTS ("AAC with no
+        global headers is currently not supported") because the config is per
+        frame rather than global extradata, and aac_adtstoasc can't fix it --
+        the filter derives extradata only after the header is due. Copying ADTS
+        made the first cut of this producer die on launch. Opus is also the only
+        thing WebRTC can carry."""
+        audio = self._stream("owlet")[1]
+        self.assertIn("-c:a libopus", audio)
+        self.assertNotIn("-c:a copy", audio)
+        self.assertIn("-ar 48000", audio)   # Opus RTP clock rate is always 48k
+
     def test_audio_producer_waits_without_shell_arithmetic(self):
         """go2rtc expands ${...} when it loads the config but leaves bare $VAR
         alone, so a $i counter would be substituted away and break the loop."""
