@@ -368,6 +368,27 @@ def _exec_source(name: str) -> str:
     return "exec:bash -c '" + cmd + "'"
 
 
+def audio_gain_filter() -> str:
+    """ffmpeg `-af` chain for the camera audio, or "" for none.
+
+    The cam's mic is honest but quiet: measured 2026-09-23 with someone
+    talking in the room, speech peaked at only -16..-22 dBFS and the room floor
+    sat at -45..-55 dBFS -- far below what a phone plays at a comfortable
+    level, so listen-in sounded like silence even with everything working.
+    Default +10 dB with a brickwall limiter (a cry can hit hard; never clip).
+    OWLET_AUDIO_GAIN_DB overrides; 0 disables the stage entirely."""
+    raw = (os.environ.get("OWLET_AUDIO_GAIN_DB") or "10").strip()
+    try:
+        gain = float(raw)
+    except ValueError:
+        gain = 10.0
+    if gain == 0:
+        return ""
+    g = ("%g" % gain)
+    # NB: no ": " in here (unquoted YAML scalar -- see _audio_source).
+    return "-af volume=%sdB,alimiter=limit=0.95 " % g
+
+
 def _audio_source(name: str) -> str:
     """A SECOND go2rtc producer for the same stream, carrying ONLY the camera's
     audio. go2rtc merges the tracks of every source listed under a stream, so
@@ -436,6 +457,7 @@ def _audio_source(name: str) -> str:
         '[ -p "$A" ] || { echo "audio %(n)s - FIFO never appeared" >&2; exit 1; }; '
         'exec ffmpeg -hide_banner -loglevel warning -fflags +genpts '
         '-use_wallclock_as_timestamps 1 -f aac -i "$A" '
+        + audio_gain_filter() +
         # lowdelay + 48k mono: Opus' RTP clock rate is always 48 kHz.
         '-c:a libopus -b:a 24k -ar 48000 -ac 1 -application lowdelay '
         '-f rtsp -rtsp_transport tcp {output}'
