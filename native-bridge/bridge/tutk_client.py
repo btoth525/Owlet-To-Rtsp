@@ -750,6 +750,62 @@ def _await_ioctl_resp(av, av_idx, want, timeout):
     return False
 
 
+
+def _dedicated_session_probe(av, iotc) -> None:
+    """R&D one-shot: open a SECOND, isolated IOTC session to the camera and try
+    avServStart2 on it. The video session (session 1) is never touched. Fully
+    tears its own session down. Tells us whether the x86 lib's -20027 on the
+    shared session is really 'no server while a client streams on this session'
+    — if avServStart2 >= 0 on a fresh session, talk-back should run on its own
+    dedicated session."""
+    try:
+        log("[talkprobe] opening a dedicated 2nd session for avServStart2 test …")
+        sid = iotc.IOTC_Get_SessionID()
+        if sid < 0:
+            log(f"[talkprobe] IOTC_Get_SessionID -> {sid}; aborting"); return
+        inp = St_IOTCConnectInput()
+        inp.structSize = 160
+        inp.authenticationType = 0
+        inp.authKey = AUTHKEY.encode()[:8]
+        inp.timeout = CONNECT_TIMEOUT
+        s2 = iotc.IOTC_Connect_ByUIDEx(UID.encode(), sid, byref(inp))
+        log(f"[talkprobe] 2nd IOTC_Connect_ByUIDEx -> {s2}")
+        if s2 < 0:
+            log("[talkprobe] camera REJECTED a 2nd parallel session — dedicated-session "
+                "talk is not possible; video session is unaffected"); return
+        av2 = -1
+        try:
+            av2 = av_client_start(av, s2, _LAST_SEC_MODE[0])
+            log(f"[talkprobe] 2nd av_client_start -> {av2}")
+            if av2 < 0:
+                log("[talkprobe] av login on 2nd session failed"); return
+            with _AV_IO:
+                chan = iotc.IOTC_Session_Get_Free_Channel(s2)
+            log(f"[talkprobe] 2nd session free channel -> {chan}")
+            for c in ([chan] if chan >= 0 else []) + [1, 2]:
+                _ctrl_speaker(av, av2, IOTYPE_SPEAKERSTART, c)
+                _await_ioctl_resp(av, av2, IOTYPE_SPEAKERSTART_RESP, 2.0)
+                sidx = av.avServStart2(s2, b"", b"", 2, 0, c)
+                log(f"[talkprobe] 2nd-session avServStart2(chan={c}) -> {sidx} "
+                    f"{'<<< SUCCESS' if sidx >= 0 else ''}")
+                if sidx >= 0:
+                    _safe(lambda: av.avServStop(sidx))
+                _safe(lambda: _ctrl_speaker(av, av2, IOTYPE_SPEAKERSTOP, c))
+                with _AV_IO:
+                    if hasattr(av, "avServExit"):
+                        _safe(lambda cc=c: av.avServExit(s2, cc))
+                    _safe(lambda cc=c: iotc.IOTC_Session_Channel_OFF(s2, cc))
+                if sidx >= 0:
+                    break
+        finally:
+            if av2 >= 0:
+                _safe(lambda: av.avClientStop(s2))
+            _safe(lambda: iotc.IOTC_Session_Close(s2))
+            log("[talkprobe] 2nd session torn down")
+    except Exception as e:  # noqa: BLE001
+        log(f"[talkprobe] error: {e}")
+
+
 def _talk_thread(av: CDLL, iotc: CDLL, session: int, av_idx: int,
                  stop_evt: threading.Event) -> None:
     """Play whatever AAC arrives on the talk FIFO out the camera's speaker.
@@ -779,6 +835,8 @@ def _talk_thread(av: CDLL, iotc: CDLL, session: int, av_idx: int,
         log(f"[talk] cannot open {TALK_FIFO}: {e}")
         return
     log(f"[talk] FIFO open (fd={fd}) — ready to receive audio on {TALK_FIFO}")
+    if os.environ.get("OWLET_TALK_SESSION_PROBE", "0") == "1":
+        threading.Timer(8.0, _dedicated_session_probe, args=(av, iotc)).start()
     buf = b""
     speaking = False
     send_idx = -1            # the av index to push audio on (server idx or av_idx)
@@ -1187,6 +1245,9 @@ def _session_mode(iotc: CDLL, session: int) -> int:
     return mode
 
 
+_LAST_SEC_MODE = [0]
+
+
 def stream_once(uid: str, sec_mode: int) -> int:
     iotc, av, tutk = load()
 
@@ -1255,6 +1316,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
         return 3
     av.avInitialize(512)
 
+    _LAST_SEC_MODE[0] = sec_mode
     session = -1
     av_idx = -1
     audio_stop = threading.Event()
