@@ -198,9 +198,12 @@ def _write_overlays(devices: list[dict], log):
                 parts.append(f"HR {sv['heart_rate']}")
             if sv.get("oxygen") is not None:
                 parts.append(f"O2 {sv['oxygen']}%")
-        if not parts:
-            continue
-        line = "   ".join(parts)
+        # No readings -> blank the HUD, don't skip. Skipping left whatever was
+        # written last time burned into the picture indefinitely (a cam whose
+        # sensors went away kept showing its final values). drawtext wants a
+        # non-empty file, so a single space is the "nothing" value -- the same
+        # seed the overlay exec writes before ffmpeg starts.
+        line = "   ".join(parts) if parts else " "
         try:
             path = os.path.join(cs.VITALS_DIR, "overlay-%s.txt" % cam["name"])
             tmp = path + ".tmp"
