@@ -143,31 +143,39 @@ class AudioProducerTests(unittest.TestCase):
         self.assertIn(base, self._stream("owlet")[1])
 
 
-class AudioGainTests(unittest.TestCase):
-    """The cam's mic is quiet (speech peaked at -16..-22 dBFS with someone in
-    the room), so the Opus producer boosts it. Must stay overridable and
-    YAML-safe."""
+class AudioFilterTests(unittest.TestCase):
+    """The Opus producer's filter chain: async resampler first (bursty P2P
+    arrival + wall-clock stamps otherwise reach the phone as jittery RTP
+    timing = choppy), then a +10 dB limited gain (the cam mic peaks at only
+    -16..-22 dBFS with someone talking). Must stay overridable and YAML-safe."""
 
     def _with(self, value):
         saved = os.environ.get("OWLET_AUDIO_GAIN_DB")
         if value is None: os.environ.pop("OWLET_AUDIO_GAIN_DB", None)
         else: os.environ["OWLET_AUDIO_GAIN_DB"] = value
         try:
-            return cs.audio_gain_filter(), cs._audio_source("owlet")
+            return cs.audio_filter(), cs._audio_source("owlet")
         finally:
             if saved is None: os.environ.pop("OWLET_AUDIO_GAIN_DB", None)
             else: os.environ["OWLET_AUDIO_GAIN_DB"] = saved
 
-    def test_default_is_plus_10db_with_limiter(self):
+    def test_default_chain(self):
         f, src = self._with(None)
-        self.assertEqual(f, "-af volume=10dB,alimiter=limit=0.95 ")
-        self.assertIn('-i "$A" -af volume=10dB,alimiter=limit=0.95 -c:a libopus', src)
+        self.assertEqual(f, "-af aresample=async=1:first_pts=0,volume=10dB,alimiter=limit=0.95 ")
+        self.assertIn('-i "$A" ' + f + '-c:a libopus', src)
 
-    def test_override_and_disable(self):
+    def test_resampler_always_present_even_with_gain_disabled(self):
+        f, src = self._with("0")
+        self.assertEqual(f, "-af aresample=async=1:first_pts=0 ")
+        self.assertNotIn("volume=", src)
+
+    def test_override_and_bad_value(self):
         self.assertIn("volume=16dB", self._with("16")[0])
-        self.assertEqual(self._with("0")[0], "")
-        self.assertIn('-i "$A" -c:a libopus', self._with("0")[1])
-        self.assertIn("volume=10dB", self._with("garbage")[0])   # bad value -> default
+        self.assertIn("volume=10dB", self._with("garbage")[0])
+
+    def test_resampler_precedes_gain(self):
+        f = self._with(None)[0]
+        self.assertLess(f.index("aresample"), f.index("volume="))
 
     def test_yaml_safe(self):
         self.assertNotIn(": ", self._with(None)[1])
