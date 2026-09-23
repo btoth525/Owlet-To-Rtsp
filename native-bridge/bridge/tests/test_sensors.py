@@ -60,5 +60,37 @@ class OverlayTextTests(unittest.TestCase):
         self.assertNotIn("491", out)
 
 
+class PlayerWireFormatTests(unittest.TestCase):
+    """Shapes lifted from the Owlet app's camera-sdk (kotlinx polymorphic JSON,
+    classDiscriminator "cmd"). The camera answers anything else with
+    {"cmd":"unknown","error_code":5,"reason":"Invalid cmd field"}."""
+
+    def test_queries_are_flat_cmd_only(self):
+        self.assertEqual(tc._player_wire("sources", {}), [{"cmd": "audio_player_sources"}])
+        self.assertEqual(tc._player_wire("state", {}), [{"cmd": "audio_player_state"}])
+        self.assertEqual(tc._player_wire("reset", {}), [{"cmd": "audio_player_reset"}])
+
+    def test_no_message_nests_the_command_name_as_a_key(self):
+        for action in ("sources", "state", "reset", "play", "stop"):
+            for body in tc._player_wire(action, {"uuids": ["u1"], "repeat": True}):
+                self.assertIn("cmd", body)
+                self.assertFalse(any(k.startswith("audio_player_") for k in body), body)
+
+    def test_play_with_queue_repeat_and_timer(self):
+        wire = tc._player_wire("play", {"uuids": ["aaa", "bbb"], "repeat": True, "timeout_ms": 1800000})
+        self.assertEqual(wire, [
+            {"cmd": "audio_player_queue", "queue": {"items": [{"uuid": "aaa"}, {"uuid": "bbb"}]}},
+            {"cmd": "audio_player_set", "player": {"queue": {"repeat": True, "timeout_ms": 1800000}}},
+            {"cmd": "audio_player_transport", "player": {"action": "play"}},
+        ])
+
+    def test_bare_transport(self):
+        self.assertEqual(tc._player_wire("pause", {}),
+                         [{"cmd": "audio_player_transport", "player": {"action": "pause"}}])
+
+    def test_unknown_action(self):
+        self.assertIsNone(tc._player_wire("dance", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
