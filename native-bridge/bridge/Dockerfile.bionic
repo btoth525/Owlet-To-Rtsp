@@ -1,10 +1,13 @@
+# Build args (global so FROM can see them). Defaults reproduce the production amd64 image.
+ARG TARGETARCH=amd64
+ARG TERMUX_TAG=x86_64
+ARG TUTK_ARCH=x86_64
 # owlet-bridge (Bionic) — runs the Owlet Android/Kalay TUTK libraries under a
 # Termux (Bionic) userspace so they actually load on an x86_64 Linux box. The
 # glibc build can't (the libs are Android, linked to Bionic's `LIBC`). Same web
 # UI, same KMS auto-fetch, same tutk_client — only the runtime changes.
 
 # go2rtc is a static Go binary (no libc dependency) — grab it in a tiny stage.
-ARG TARGETARCH=amd64
 FROM debian:stable-slim AS dl
 ARG TARGETARCH
 ARG GO2RTC_VERSION=1.9.4
@@ -14,9 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && chmod +x /go2rtc \
  && cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /DejaVuSans.ttf
 
-ARG TARGETARCH=amd64
-ARG TERMUX_TAG=x86_64
 FROM termux/termux-docker:${TERMUX_TAG}
+ARG TUTK_ARCH
 
 # 1) Run Termux's bootstrap second stage (the entrypoint does this at container
 #    start; we need it now so the package manager works during the build).
@@ -52,7 +54,6 @@ RUN mkdir -p /bin \
  && ln -sf /data/data/com.termux/files/usr/bin/sh /bin/sh \
  && ln -sf /data/data/com.termux/files/usr/bin/bash /bin/bash
 
-ARG TUTK_ARCH=x86_64
 ENV TUTK_ARCH=${TUTK_ARCH} \
     TUTK_LIB_DIR=/app/libs/${TUTK_ARCH} \
     LD_LIBRARY_PATH=/app/libs/${TUTK_ARCH}:/data/data/com.termux/files/usr/lib \
