@@ -30,6 +30,7 @@ REGIONS: dict[str, dict[str, str]] = {
         "base": "https://ads-field-1a2039d9.aylanetworks.com/apiv1",
         "app_id": "sso-prod-3g-id",
         "app_secret": "sso-prod-UEjtnPCtFfjdwIwxqnC0OipxRFU",
+        "kms": "https://camera-kms.owletdata.com/kms/{dsn}",
     },
     "europe": {
         "firebase_key": "AIzaSyDm6EhV70wudwN3iOSq3vTjtsdGjdFLuuM",
@@ -39,6 +40,8 @@ REGIONS: dict[str, dict[str, str]] = {
         "base": "https://ads-field-eu-1a2039d9.aylanetworks.com/apiv1",
         "app_id": "OwletCare-Android-EU-fw-id",
         "app_secret": "OwletCare-Android-EU-JKupMPBoj_Npce_9a95Pc8Qo0Mw",
+        # NB: EU tokens are rejected by the world KMS ("Jwt issuer is not configured").
+        "kms": "https://camera-kms.eu.owletdata.com/kms/{dsn}",
     },
 }
 
@@ -125,7 +128,7 @@ class OwletAPI:
             self.log(f"[kms] DSN '{dsn}' starts with a zero — Owlet cam DSNs start "
                      f"with the letter O; using '{fixed}'")
             dsn = fixed
-        url = KMS_URL.format(dsn=dsn)
+        url = self.cfg.get("kms", KMS_URL).format(dsn=dsn)
         self.log(f"[kms] GET camera key for {dsn} …")
         r = self.s.get(url, headers={"Authorization": self.firebase_token}, timeout=20)
         if r.status_code != 200:

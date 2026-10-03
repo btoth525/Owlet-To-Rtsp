@@ -1033,6 +1033,17 @@ class St_IOTCConnectInput(Structure):
     ]
 
 
+# Older SDK build (Owlet app 3.25.0 x86_64): IOTC_Connect_ByUIDEx does
+# `cmpl $0x14,(%rdx); jne -> -46`, i.e. the classic 20-byte v1 struct.
+class St_IOTCConnectInputV1(Structure):
+    _fields_ = [
+        ("structSize", c_int),          # 0x00  must be 20
+        ("authenticationType", c_int),  # 0x04
+        ("authKey", c_char * 8),        # 0x08  exactly 8 chars
+        ("timeout", c_int),             # 0x10  -> 0x14
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # SessionModeVer — the struct IOTC_Session_Check() fills in. Standard TUTK
 # IOTCAPIs.h layout: two unsigned ints, no padding.
@@ -1173,7 +1184,7 @@ def stream_once(uid: str, sec_mode: int) -> int:
     _set_sig(iotc, "IOTC_Initialize2", c_int, [c_uint])
     _set_sig(iotc, "IOTC_Get_SessionID", c_int, [])
     _set_sig(iotc, "IOTC_Connect_ByUIDEx", c_int,
-             [c_char_p, c_int, POINTER(St_IOTCConnectInput)])
+             [c_char_p, c_int, c_void_p])  # 160-byte or 20-byte struct
     _set_sig(iotc, "IOTC_Connect_ByUID_Parallel", c_int, [c_char_p, c_int])
     _set_sig(iotc, "IOTC_Session_Close", c_int, [c_int])
     _set_sig(iotc, "IOTC_Session_Check", c_int, [c_int, c_void_p])
@@ -1272,6 +1283,15 @@ def stream_once(uid: str, sec_mode: int) -> int:
             inp.timeout = CONNECT_TIMEOUT
             session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
             log(f"IOTC_Connect_ByUIDEx -> {session}")
+            if session == -46:
+                # Size guard rejected the 160-byte struct: retry with the v1 layout.
+                inp1 = St_IOTCConnectInputV1()
+                inp1.structSize = 20
+                inp1.authenticationType = 0
+                inp1.authKey = ak[:8]
+                inp1.timeout = CONNECT_TIMEOUT
+                session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp1))
+                log(f"IOTC_Connect_ByUIDEx (20-byte struct) -> {session}")
             if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
                 # Fallback for cams that don't require the authKey.
                 session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
