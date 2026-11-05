@@ -2,7 +2,17 @@
 # Bionic runtime startup: control panel (Flask) + go2rtc. The Owlet TUTK libs
 # load here because this is a Bionic (Termux) userspace.
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
-export LD_LIBRARY_PATH=/app/libs/x86_64:/data/data/com.termux/files/usr/lib
+# Resolve one SDK directory for the loader, provisioner, and load probe.
+# This image and lib_extract.py support x86_64 only. Reject other architectures
+# before provisioning can overwrite a custom directory with the wrong binaries.
+# BEGIN SDK ARCH GUARD
+case "${TUTK_ARCH:-x86_64}" in
+  x86_64) ;;
+  *) printf '%s\n' 'Unsupported TUTK_ARCH: this image requires x86_64' >&2; exit 64 ;;
+esac
+# END SDK ARCH GUARD
+export TUTK_LIB_DIR="${TUTK_LIB_DIR:-/app/libs/x86_64}"
+export LD_LIBRARY_PATH="$TUTK_LIB_DIR:/data/data/com.termux/files/usr/lib"
 
 mkdir -p /config /config/vitals 2>/dev/null
 if [ ! -f /config/owlet.env ]; then
@@ -36,12 +46,12 @@ _trim_logs
 
 # Auto-provision the proprietary TUTK libs from a dropped Owlet APK (.apk/.apkm)
 # if they're not already in the mounted libs folder. No-op once they're present.
-python3 -c 'import sys; sys.path.insert(0,"/app"); from lib_extract import provision; ok,m=provision("/app/libs/x86_64",["/config","/app/libs","/apk"]); print("[owlet-bridge/bionic] libs:",m)' 2>&1
+python3 -c 'import os, sys; sys.path.insert(0,"/app"); from lib_extract import provision; ok,m=provision(os.environ["TUTK_LIB_DIR"],["/config","/app/libs","/apk"]); print("[owlet-bridge/bionic] libs:",m)' 2>&1
 
 # sanity: confirm the TUTK libs load at startup (logs to container output)
 python3 - <<'PY' 2>&1 || echo "[owlet-bridge/bionic] WARN: TUTK libs not loadable yet (mount /app/libs)"
 import ctypes, os
-d = os.environ.get("TUTK_LIB_DIR", "/app/libs/x86_64")
+d = os.environ["TUTK_LIB_DIR"]
 for n in ("libTUTKGlobalAPIs.so","libP2PTunnelAPIs.so","libRDTAPIs.so","libIOTCAPIs.so","libAVAPIs.so"):
     p = os.path.join(d, n)
     if os.path.exists(p):
@@ -102,3 +112,4 @@ if [ "${OWLET_WATCHDOG:-1}" = "1" ]; then
 fi
 
 exec go2rtc -config "$GO2RTC_CFG"
+
