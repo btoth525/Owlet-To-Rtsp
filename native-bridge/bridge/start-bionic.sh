@@ -3,8 +3,15 @@
 # load here because this is a Bionic (Termux) userspace.
 export PATH=/data/data/com.termux/files/usr/bin:/usr/local/bin:/usr/bin:/bin
 # Resolve one SDK directory for the loader, provisioner, and load probe.
-# Explicit TUTK_LIB_DIR wins; beta's TUTK_ARCH selects its normal default.
-export TUTK_LIB_DIR="${TUTK_LIB_DIR:-/app/libs/${TUTK_ARCH:-x86_64}}"
+# This image and lib_extract.py support x86_64 only. Reject other architectures
+# before provisioning can overwrite a custom directory with the wrong binaries.
+# BEGIN SDK ARCH GUARD
+case "${TUTK_ARCH:-x86_64}" in
+  x86_64) ;;
+  *) printf '%s\n' 'Unsupported TUTK_ARCH: this image requires x86_64' >&2; exit 64 ;;
+esac
+# END SDK ARCH GUARD
+export TUTK_LIB_DIR="${TUTK_LIB_DIR:-/app/libs/x86_64}"
 export LD_LIBRARY_PATH="$TUTK_LIB_DIR:/data/data/com.termux/files/usr/lib"
 
 mkdir -p /config /config/vitals 2>/dev/null
@@ -105,3 +112,4 @@ if [ "${OWLET_WATCHDOG:-1}" = "1" ]; then
 fi
 
 exec go2rtc -config "$GO2RTC_CFG"
+
